@@ -1,0 +1,143 @@
+pec-cli — project structure for LLM context
+===========================================
+
+Purpose
+-------
+A Python CLI (`pec`) for reading and sending PEC (Posta Elettronica
+Certificata — Italian certified email). Designed to be consumed by both
+humans (compact pretty-print) and AI agents (NDJSON via `--json`). Talks
+plain IMAPS/SMTPS to the certified servers of the major Italian providers;
+no OAuth, password is encrypted at rest with Fernet.
+
+Top-level layout
+----------------
+pec-cli/
+├── CLAUDE.md                # Project-specific instructions for Claude Code
+├── README.md                # User documentation
+├── LICENSE                  # MIT
+├── Makefile                 # install / dev / test / lint / clean
+├── pyproject.toml           # hatchling build, deps, entry point
+├── .gitignore               # Python + credentials + key.bin + attachments/
+├── app_structure_llm.txt    # This file
+├── skills/
+│   ├── install.sh           # Copies the skill to ~/.config/mayai-cli/skills/
+│   └── pec-cli.md           # Agent-facing usage guide
+├── pec_cli/                 # Python package — main code lives here
+│   ├── __init__.py          # Exposes __version__
+│   ├── main.py              # Click entry point; registers all commands
+│   ├── auth/
+│   │   ├── __init__.py      # Re-exports Credentials + storage helpers
+│   │   └── credentials.py   # Provider presets + Fernet-encrypted storage
+│   ├── imap/
+│   │   ├── __init__.py      # Re-exports IMAPClient, IMAPError
+│   │   └── client.py        # imaplib-based client, folder aliasing, parsing
+│   ├── smtp/
+│   │   ├── __init__.py      # Re-exports send_pec, SMTPError
+│   │   └── sender.py        # smtplib SMTP_SSL sender, MIME attachments
+│   ├── models/
+│   │   ├── __init__.py      # Re-exports MessageSummary, Message, Attachment
+│   │   └── message.py       # Dataclasses + PEC cert-attachment filter
+│   └── output/
+│       ├── __init__.py      # Re-exports emit / error
+│       └── formatter.py     # NDJSON + human pretty-print, strips empties
+└── tests/                   # pytest tests (placeholder)
+
+Entry point
+-----------
+`pec_cli.main:cli` (registered as `pec` in pyproject.toml).
+
+Command tree
+------------
+pec
+├── auth
+│   ├── login   --address ADDR --provider {aruba,legalmail,namirial,register}
+│   ├── status
+│   └── logout
+├── list   [--folder inbox|sent|<raw>] [--unread] [--from YYYY-MM-DD] [--limit N]
+├── get    <id> [--folder F] [--save-attachments] [--out DIR]
+└── send   --to ADDR [--to ADDR ...] [--cc ADDR ...] --subject S
+            (--body TEXT | --file PATH) [--attach PATH ...] [--dry-run]
+
+Global flags (`--json`, `--verbose`) are accepted in any position thanks to the
+`common_flags` decorator in `main.py` which re-declares them on every
+subcommand and promotes them onto the shared `CLIContext`.
+
+Credentials storage
+-------------------
+~/.config/mayai-cli/pec/credentials.json   (mode 0600)
+~/.config/mayai-cli/pec/key.bin            (mode 0600 — Fernet key)
+
+credentials.json shape:
+{
+  "address": "mia@pec.it",
+  "provider": "aruba",
+  "password_enc": "<Fernet ciphertext, urlsafe base64>"
+}
+
+Provider presets (auth/credentials.py)
+--------------------------------------
+| Provider   | IMAP                           | SMTP                           |
+|------------|--------------------------------|--------------------------------|
+| aruba      | imaps.pec.aruba.it:993         | smtps.pec.aruba.it:465         |
+| legalmail  | imapmail.legalmail.it:993      | smtpmail.legalmail.it:465      |
+| namirial   | imap.namirialpec.it:993        | smtp.namirialpec.it:465        |
+| register   | imap.pec.register.it:993       | smtp.pec.register.it:465       |
+
+All four use implicit SSL/TLS. No STARTTLS variants are wired up.
+
+Folder aliasing
+---------------
+`--folder inbox`  -> "INBOX"
+`--folder sent`   -> first of "INBOX.Sent", "Sent", "INBOX/Sent", "Posta inviata"
+Anything else is passed through as a raw IMAP folder name.
+
+PEC-specific behavior
+---------------------
+- Per-message `pec_type` is read from `X-Ricevuta` (preferred) or `X-Trasporto`.
+  Common values: `accettazione`, `consegna`, `errore`, `preavviso`, `posta-certificata`.
+- Certification attachments (`daticert.xml`, `postacert.eml`, `smime.p7s`,
+  `smime.p7m`) are filtered from the default `get` view and from
+  `--save-attachments`. Pass `--verbose` to include them.
+- `IMAP search` uses `BODY.PEEK[...]` so listing does not mark messages as
+  read. `\Seen` flag is reported as `unread: true|false`.
+
+Output conventions
+------------------
+- stdout = data; stderr = errors and `--verbose` protocol logs.
+- Default human output: indented key/value tree, empty/null fields hidden.
+- `--json`: NDJSON. Lists are streamed one object per line.
+- Exit codes: 0 ok, 1 application error, 2 not authenticated.
+
+Patterns to follow when adding new commands
+-------------------------------------------
+1. Add provider presets, if needed, in `pec_cli/auth/credentials.py::PROVIDERS`.
+2. In `main.py`, register the command on the root group (this CLI has a flat
+   command tree — there are no list/get subgroups like fatture-cli).
+3. Stack decorators in this order (bottom up):
+     @cli.command("name", help="...")
+     @click.option(...)                  # command-specific options
+     @common_flags                       # adds --json / --verbose
+     @pass_ctx                           # injects CLIContext
+     def _handler(ctx, ...):
+4. Pull credentials with `ctx.require_credentials()` (exits 2 on missing).
+5. For IMAP: open `IMAPClient(creds, verbose=ctx.verbose)` as a context
+   manager, call `select_folder()`, then `search()` / `fetch_summaries()` /
+   `fetch_message()`. Catch `IMAPError` -> `error(...)` + `sys.exit(1)`.
+6. For SMTP: call `send_pec(creds, ...)`; catch `SMTPError` -> `error(...)`
+   + `sys.exit(1)`.
+7. End with `emit(rows_or_dict, as_json=ctx.as_json)`.
+
+Dependencies
+------------
+Runtime:  click >= 8.1, cryptography >= 42.0
+Dev:      pytest >= 8, ruff >= 0.5
+Build:    hatchling
+
+IMAP/SMTP are stdlib (`imaplib`, `smtplib`, `email`) — no extra HTTP client.
+
+Limits
+------
+No client-side throttling. Italian PEC providers generally allow at least
+several hundred operations per hour; aggressive polling can trigger
+temporary blocks at the provider level — `pec list --limit N` is preferred
+to repeated full pulls.
