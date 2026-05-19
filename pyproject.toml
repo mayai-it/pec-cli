@@ -3,23 +3,56 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "pec-cli"
+name = "mayai-pec-cli"
 version = "0.1.0"
-description = "CLI for PEC (Posta Elettronica Certificata) — built for AI agents and developers"
+description = "Command-line client for Italian PEC (Posta Elettronica Certificata) — built for AI agents and developers."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "MayAI", email = "info@mayai.it" }]
-keywords = ["pec", "cli", "email", "imap", "smtp", "ai-agents"]
+maintainers = [{ name = "MayAI", email = "info@mayai.it" }]
+keywords = [
+    "pec",
+    "posta-elettronica-certificata",
+    "italy",
+    "italian",
+    "cli",
+    "command-line",
+    "email",
+    "imap",
+    "smtp",
+    "ai-agents",
+    "llm",
+    "aruba",
+    "legalmail",
+    "infocert",
+    "namirial",
+    "poste-italiane",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Legal Industry",
     "License :: OSI Approved :: MIT License",
+    "Natural Language :: English",
+    "Natural Language :: Italian",
+    "Operating System :: OS Independent",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3 :: Only",
     "Topic :: Communications :: Email",
+    "Topic :: Communications :: Email :: Post-Office :: IMAP",
+    "Topic :: Communications :: Email :: Post-Office :: POP3",
+    "Topic :: Office/Business",
+    "Topic :: Utilities",
+    "Typing :: Typed",
 ]
 dependencies = [
     "click>=8.1.0",
@@ -31,6 +64,8 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
     "ruff>=0.5.0",
+    "build>=1.2.0",
+    "twine>=5.0.0",
 ]
 
 [project.scripts]
@@ -38,10 +73,23 @@ pec = "pec_cli.main:cli"
 
 [project.urls]
 Homepage = "https://mayai.it"
+Documentation = "https://github.com/mayai-it/pec-cli#readme"
 Repository = "https://github.com/mayai-it/pec-cli"
+Issues = "https://github.com/mayai-it/pec-cli/issues"
+Changelog = "https://github.com/mayai-it/pec-cli/releases"
 
 [tool.hatch.build.targets.wheel]
 packages = ["pec_cli"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "pec_cli",
+    "tests",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+    "Makefile",
+]
 
 [tool.ruff]
 line-length = 100

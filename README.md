@@ -18,18 +18,20 @@ Part of [MayAI CLI](https://mayai.it).
 
 ## Installation
 
+From PyPI (recommended):
+
+```bash
+pip install mayai-pec-cli
+```
+
+The package installs a single `pec` command on your `PATH`.
+
 From source:
 
 ```bash
 git clone https://github.com/mayai-it/pec-cli.git
 cd pec-cli
 make install
-```
-
-Or directly with pip:
-
-```bash
-pip install -e .
 ```
 
 For local development (adds `pytest`, `ruff`):
@@ -56,7 +58,13 @@ pec --json list --unread --from 2025-01-01 --limit 50
 # 5. Read a single message and save its attachments to ./attachments
 pec get 1234 --save-attachments ./attachments
 
-# 6. Send a PEC with an attachment
+# 6. Inspect the parsed PEC certification (daticert.xml) for a message
+pec get 1234 --cert --json
+
+# 7. Trace the full receipt chain for an original message id
+pec trace 'opec123.20260321102500.12345.67.1.1@pec.it'
+
+# 8. Send a PEC with an attachment
 pec send --to dest@pec.it --subject "Oggetto" --file body.txt --attach doc.pdf
 ```
 
@@ -64,11 +72,12 @@ pec send --to dest@pec.it --subject "Oggetto" --file body.txt --attach doc.pdf
 
 | Command | Description |
 |---|---|
-| `pec auth login --address ADDR --provider P` | Prompt for password, verify via IMAP, save credentials (encrypted). |
+| `pec auth login --address ADDR --provider P` | Prompt for password, verify via IMAP, save credentials in the system keyring (Fernet-encrypted file as fallback). |
 | `pec auth status` | Show whether credentials are present. |
-| `pec auth logout` | Delete saved credentials and the encryption key. |
+| `pec auth logout` | Delete saved credentials (keyring entry + any local encryption key). |
 | `pec list [--folder F] [--unread] [--from YYYY-MM-DD] [--limit N]` | List PEC messages (default folder `inbox`, default limit 20). |
-| `pec get <id> [--folder F] [--save-attachments DIR]` | Fetch a single PEC by IMAP UID; optionally save attachments to `DIR`. |
+| `pec get <id> [--folder F] [--save-attachments DIR] [--cert]` | Fetch a single PEC by IMAP UID; `--cert` includes the parsed `daticert.xml` certification; `--save-attachments` writes attachments to `DIR`. |
+| `pec trace <message-id> [--folder F] [--limit N]` | Find every receipt in the folder whose `daticert.xml` references this message id, ordered chronologically (`accettazione` → `presa-in-carico` → `avvenuta-consegna` / `errore-consegna`). |
 | `pec send --to ADDR --subject S (--body T | --file F) [--attach F] [--cc ADDR] [--dry-run]` | Send a PEC; `--to`, `--cc`, `--attach` are repeatable. |
 
 ### Global flags
@@ -109,17 +118,21 @@ PEC is plain IMAP/SMTP with SSL — there's no OAuth. `pec auth login`:
 
 1. Prompts you for the password on stderr (never echoed, never on argv).
 2. Verifies it by opening an IMAP connection and logging in.
-3. Generates a Fernet key (if not already present) and encrypts the password
-   with it.
-4. Writes the encrypted blob plus address/provider metadata to
-   `~/.config/mayai-cli/pec/credentials.json`, mode `0600`.
-5. Stores the Fernet key alongside it at
-   `~/.config/mayai-cli/pec/key.bin`, mode `0600`.
+3. Stores the password in the **system keyring** — macOS Keychain, Linux
+   Secret Service, or Windows Credential Locker (DPAPI) — under the service
+   name `mayai-cli-pec` and the PEC address as the username.
+4. Writes a small metadata file at
+   `~/.config/mayai-cli/pec/credentials.json` (mode `0600`) recording the
+   address, provider, and where the password lives.
 
-Both files are removed by `pec auth logout`. Keeping the key in a separate
-file is defense in depth — it doesn't stop a local attacker who can read both
-files, but a leaked `credentials.json` on its own is unusable.
+On headless boxes or CI where no keyring backend is available, the CLI
+transparently falls back to **Fernet** encryption: a 32-byte key at
+`~/.config/mayai-cli/pec/key.bin` (mode `0600`) encrypts the password inside
+`credentials.json`. Existing installs that still have a `key.bin` are
+migrated to the keyring on the next `pec auth login` (and `key.bin` is then
+removed).
 
+`pec auth logout` clears the keyring entry and removes the on-disk files.
 The password is never written to plain disk and never accepted via a
 command-line flag.
 
@@ -148,11 +161,43 @@ The full message — `from`, `to`, `cc`, `subject`, `date`, plain-text body
 (HTML body too with `--verbose`), and the attachment list with each
 attachment's filename and size in bytes.
 
+PEC messages that carry a `daticert.xml` certification (every receipt and
+every sent PEC) get an extra `pec_cert_type` field in the default output,
+e.g. `"avvenuta-consegna"`. Pass `--cert` to also include the fully parsed
+certification (`tipo`, `mittente`, `destinatari`, `data`, `identificativo`,
+`riferimento_message_id`, `oggetto`, optional `errore`):
+
+```bash
+pec get 1234 --cert --json
+```
+
 By default the PEC certification files (`daticert.xml`, `postacert.eml`,
 `smime.p7s`, `smime.p7m`) are filtered out of both the listed attachments
 and the saved files; pass `--verbose` to include them. Use
 `--save-attachments DIR` to write attachments to disk under `DIR`
 (created if it doesn't exist).
+
+### What `pec trace` returns
+
+`pec trace <message-id>` scans recent PECs in a folder (default `inbox`,
+`--limit 200`), reads each `daticert.xml`, and returns the chain whose
+`riferimento_message_id` matches the given id, sorted chronologically:
+
+```json
+{
+  "message_id": "opec123.20260321102500.12345.67.1.1@pec.it",
+  "events": [
+    {"id": "204", "tipo": "accettazione",     "data": "2026-03-21T10:25:00+01:00", "...": "..."},
+    {"id": "205", "tipo": "presa-in-carico",  "data": "2026-03-21T10:25:04+01:00", "...": "..."},
+    {"id": "206", "tipo": "avvenuta-consegna","data": "2026-03-21T10:25:07+01:00", "...": "..."}
+  ],
+  "count": 3
+}
+```
+
+The argument is the certified `identificativo` of the original message — the
+same value `pec get --cert` returns under `pec_cert.identificativo`. Surround
+or strip `<...>` brackets as you wish; the CLI normalizes them.
 
 ## Development
 
