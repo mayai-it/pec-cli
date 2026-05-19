@@ -249,6 +249,13 @@ def list_messages(
     default=None,
     help="Save attachments to the given directory (e.g. ./attachments).",
 )
+@click.option(
+    "--cert",
+    "show_cert",
+    is_flag=True,
+    default=False,
+    help="Include the parsed daticert.xml certification (tipo, mittente, identificativo, ...).",
+)
 @common_flags
 @pass_ctx
 def get_message(
@@ -256,6 +263,7 @@ def get_message(
     message_id: str,
     folder: str,
     save_dir: Path | None,
+    show_cert: bool,
 ) -> None:
     creds = ctx.require_credentials()
 
@@ -279,7 +287,11 @@ def get_message(
             target.write_bytes(att.data)
             saved.append(str(target))
 
-    payload = message.to_dict(include_html=ctx.verbose, include_cert=ctx.verbose)
+    payload = message.to_dict(
+        include_html=ctx.verbose,
+        include_cert=show_cert or ctx.verbose,
+        include_cert_xml=ctx.verbose,
+    )
     if saved:
         payload["saved_attachments"] = saved
     emit(payload, as_json=ctx.as_json)
@@ -368,6 +380,83 @@ def send(
         sys.exit(1)
 
     emit(result, as_json=ctx.as_json)
+
+
+# ---------------------------------------------------------------------------
+# trace
+# ---------------------------------------------------------------------------
+
+
+@cli.command("trace", help="Trace the receipt chain for a PEC message id.")
+@click.argument("target_message_id")
+@click.option(
+    "--folder",
+    default="inbox",
+    show_default=True,
+    help="Folder to scan (inbox is where receipts arrive).",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=200,
+    show_default=True,
+    help="Max recent PEC receipts to scan in the folder.",
+)
+@common_flags
+@pass_ctx
+def trace(
+    ctx: CLIContext,
+    target_message_id: str,
+    folder: str,
+    limit: int,
+) -> None:
+    target = target_message_id.strip().lstrip("<").rstrip(">").strip()
+    if not target:
+        error("message id is empty")
+        sys.exit(1)
+
+    creds = ctx.require_credentials()
+
+    try:
+        with IMAPClient(creds, verbose=ctx.verbose) as client:
+            client.select_folder(folder)
+            uids = client.search()
+            uids = uids[-limit:] if limit else uids
+            # fetch summaries first so we only open the bodies of PEC receipts
+            summaries = client.fetch_summaries(uids)
+            pec_uids = [s.id for s in summaries if s.pec_type]
+
+            chain: list[dict[str, Any]] = []
+            for uid in pec_uids:
+                msg = client.fetch_message(uid)
+                if msg.daticert is None:
+                    continue
+                if msg.daticert.riferimento_message_id != target:
+                    continue
+                err = msg.daticert.errore
+                chain.append({
+                    "id": msg.id,
+                    "tipo": msg.daticert.tipo,
+                    "data": msg.daticert.data,
+                    "identificativo": msg.daticert.identificativo,
+                    "mittente": msg.daticert.mittente,
+                    "destinatari": msg.daticert.destinatari,
+                    "errore": err if err and err != "nessuno" else None,
+                })
+    except IMAPError as exc:
+        error(str(exc))
+        sys.exit(1)
+
+    chain.sort(key=lambda r: r.get("data") or "")
+
+    emit(
+        {
+            "message_id": target,
+            "events": chain,
+            "count": len(chain),
+        },
+        as_json=ctx.as_json,
+    )
 
 
 if __name__ == "__main__":

@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from pec_cli.daticert import DatiCert
+
 
 @dataclass
 class Attachment:
@@ -64,8 +66,15 @@ class Message:
     body_text: str
     body_html: str | None
     attachments: list[Attachment] = field(default_factory=list)
+    daticert: DatiCert | None = None
 
-    def to_dict(self, *, include_html: bool = False, include_cert: bool = False) -> dict:
+    def to_dict(
+        self,
+        *,
+        include_html: bool = False,
+        include_cert: bool = False,
+        include_cert_xml: bool = False,
+    ) -> dict:
         out: dict = {
             "id": self.id,
             "date": self.date,
@@ -76,12 +85,16 @@ class Message:
             "pec_type": self.pec_type,
             "body": self.body_text,
         }
+        if self.daticert is not None:
+            out["pec_cert_type"] = self.daticert.tipo
         if include_html and self.body_html:
             out["body_html"] = self.body_html
+        if include_cert and self.daticert is not None:
+            out["pec_cert"] = self.daticert.to_dict()
         atts = [
             a.to_dict()
             for a in self.attachments
-            if include_cert or not _is_cert_attachment(a)
+            if include_cert_xml or not _is_cert_attachment(a)
         ]
         if atts:
             out["attachments"] = atts

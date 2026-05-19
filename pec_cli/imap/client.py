@@ -21,6 +21,7 @@ from email.header import decode_header, make_header
 from email.message import Message as EmailMessage
 
 from pec_cli.auth import Credentials
+from pec_cli.daticert import DatiCert, parse_daticert
 from pec_cli.models import Attachment, Message, MessageSummary
 
 
@@ -264,6 +265,7 @@ class IMAPClient:
 
         text, html = _extract_bodies(parsed)
         attachments = _walk_attachments(parsed, load_bytes=True)
+        daticert = _find_daticert(attachments)
 
         return Message(
             id=str(uid),
@@ -276,7 +278,15 @@ class IMAPClient:
             body_text=text,
             body_html=html,
             attachments=attachments,
+            daticert=daticert,
         )
+
+
+def _find_daticert(attachments: list[Attachment]) -> DatiCert | None:
+    for att in attachments:
+        if (att.filename or "").lower() == "daticert.xml" and att.data:
+            return parse_daticert(att.data)
+    return None
 
 
 # ---------------------------------------------------------------------------

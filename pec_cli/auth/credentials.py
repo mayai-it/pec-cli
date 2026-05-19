@@ -1,12 +1,17 @@
-"""Persisted PEC credentials with Fernet-encrypted password at rest.
+"""Persisted PEC credentials.
 
-Layout under ~/.config/mayai-cli/pec/:
-    key.bin           # 32-byte url-safe Fernet key, mode 0600
-    credentials.json  # JSON with address, provider, encrypted password, mode 0600
+Password storage is layered:
 
-The key file is *not* a strong defense against a local attacker who can read
-both files — it's defense in depth so a leaked credentials.json alone is
-unusable. Both files are chmod 0600 so other users on the box can't read them.
+1. **System keyring** (preferred) — macOS Keychain, Linux Secret Service,
+   Windows DPAPI via the `keyring` library. Nothing sensitive on disk.
+2. **Fernet-encrypted file** (fallback) — for headless boxes / CI where no
+   keyring backend is available. Key lives in `~/.config/mayai-cli/pec/key.bin`
+   (chmod 0600); the encrypted password rides inside `credentials.json`.
+
+`credentials.json` carries a `password_storage` discriminator so we know
+where the password actually lives, and `address` so the keyring lookup can
+find it. Legacy files without the discriminator are treated as `fernet` and
+migrated to keyring on the next `pec auth login`.
 """
 
 from __future__ import annotations
@@ -22,6 +27,8 @@ from cryptography.fernet import Fernet, InvalidToken
 CONFIG_DIR = Path.home() / ".config" / "mayai-cli" / "pec"
 CREDENTIALS_PATH = CONFIG_DIR / "credentials.json"
 KEY_PATH = CONFIG_DIR / "key.bin"
+
+KEYRING_SERVICE = "mayai-cli-pec"
 
 
 @dataclass(frozen=True)
@@ -92,11 +99,57 @@ class Credentials:
 
     address: str
     provider: str
-    password: str  # plaintext in memory; encrypted on disk
+    password: str  # plaintext in memory; encrypted on disk or in OS keyring
 
     @property
     def provider_config(self) -> ProviderConfig:
         return get_provider(self.provider)
+
+
+# ---------------------------------------------------------------------------
+# Keyring helpers (best-effort; any failure falls back to Fernet)
+# ---------------------------------------------------------------------------
+
+
+def _keyring_set(address: str, password: str) -> bool:
+    try:
+        import keyring  # type: ignore[import-not-found]
+
+        keyring.set_password(KEYRING_SERVICE, address, password)
+        # Some backends (e.g. `keyring.backends.fail.Keyring`) accept calls
+        # silently; verify the round-trip so we know it actually worked.
+        got = keyring.get_password(KEYRING_SERVICE, address)
+        return got == password
+    except Exception:
+        return False
+
+
+def _keyring_get(address: str) -> str | None:
+    try:
+        import keyring  # type: ignore[import-not-found]
+
+        return keyring.get_password(KEYRING_SERVICE, address)
+    except Exception:
+        return None
+
+
+def _keyring_delete(address: str) -> bool:
+    try:
+        import keyring  # type: ignore[import-not-found]
+        import keyring.errors  # type: ignore[import-not-found]
+
+        try:
+            keyring.delete_password(KEYRING_SERVICE, address)
+            return True
+        except keyring.errors.PasswordDeleteError:
+            return False
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Persistence
+# ---------------------------------------------------------------------------
 
 
 def _ensure_config_dir() -> None:
@@ -121,8 +174,21 @@ def load_credentials() -> Credentials | None:
     with CREDENTIALS_PATH.open("r", encoding="utf-8") as fh:
         raw = json.load(fh)
 
+    address = raw["address"]
+    provider = raw["provider"]
+    storage = raw.get("password_storage", "fernet")
+
+    if storage == "keyring":
+        password = _keyring_get(address)
+        if password is None:
+            raise RuntimeError(
+                "credentials.json says password is stored in the system keyring "
+                "but it can't be retrieved — run `pec auth login` to re-save it"
+            )
+        return Credentials(address=address, provider=provider, password=password)
+
+    # Fernet path (legacy or fallback when no keyring backend is available)
     if not KEY_PATH.exists():
-        # Encrypted blob exists but the key is gone — we can't recover.
         raise RuntimeError(
             "credentials present but encryption key is missing — "
             "run `pec auth logout` and `pec auth login` again"
@@ -133,23 +199,31 @@ def load_credentials() -> Credentials | None:
     except InvalidToken as exc:
         raise RuntimeError("could not decrypt stored password — key/credentials mismatch") from exc
 
-    return Credentials(
-        address=raw["address"],
-        provider=raw["provider"],
-        password=password,
-    )
+    return Credentials(address=address, provider=provider, password=password)
 
 
 def save_credentials(creds: Credentials) -> None:
     _ensure_config_dir()
-    key = _load_or_create_key()
-    enc = Fernet(key).encrypt(creds.password.encode("utf-8")).decode("utf-8")
 
-    payload = {
+    payload: dict = {
         "address": creds.address,
         "provider": creds.provider,
-        "password_enc": enc,
     }
+
+    if _keyring_set(creds.address, creds.password):
+        payload["password_storage"] = "keyring"
+        # If we successfully migrated to keyring, the on-disk Fernet key is no
+        # longer needed — remove it so a fresh install never carries a key.bin.
+        if KEY_PATH.exists():
+            try:
+                KEY_PATH.unlink()
+            except OSError:
+                pass
+    else:
+        key = _load_or_create_key()
+        enc = Fernet(key).encrypt(creds.password.encode("utf-8")).decode("utf-8")
+        payload["password_storage"] = "fernet"
+        payload["password_enc"] = enc
 
     tmp = CREDENTIALS_PATH.with_suffix(".tmp")
     with tmp.open("w", encoding="utf-8") as fh:
@@ -160,10 +234,18 @@ def save_credentials(creds: Credentials) -> None:
 
 def delete_credentials() -> bool:
     removed = False
+    address: str | None = None
     if CREDENTIALS_PATH.exists():
+        try:
+            with CREDENTIALS_PATH.open("r", encoding="utf-8") as fh:
+                address = json.load(fh).get("address")
+        except (OSError, json.JSONDecodeError):
+            address = None
         CREDENTIALS_PATH.unlink()
         removed = True
     if KEY_PATH.exists():
         KEY_PATH.unlink()
+        removed = True
+    if address and _keyring_delete(address):
         removed = True
     return removed
