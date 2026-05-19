@@ -6,7 +6,8 @@ context-efficient: the default output strips empty fields, and `--json`
 produces NDJSON suitable for piping into LLMs or jq.
 
 Talks to the standard IMAP/SMTP endpoints exposed by Italian PEC providers
-(Aruba, Legalmail/InfoCert, Namirial, Register.it), all over SSL/TLS.
+(Aruba, Legalmail/InfoCert, Namirial, Register.it, Poste Italiane, Pec.it),
+all over SSL/TLS.
 
 Part of [MayAI CLI](https://mayai.it).
 
@@ -52,8 +53,8 @@ pec --json list
 # 4. Filter to unread, since a given date
 pec --json list --unread --from 2025-01-01 --limit 50
 
-# 5. Read a single message and save its attachments
-pec get 1234 --save-attachments
+# 5. Read a single message and save its attachments to ./attachments
+pec get 1234 --save-attachments ./attachments
 
 # 6. Send a PEC with an attachment
 pec send --to dest@pec.it --subject "Oggetto" --file body.txt --attach doc.pdf
@@ -67,7 +68,7 @@ pec send --to dest@pec.it --subject "Oggetto" --file body.txt --attach doc.pdf
 | `pec auth status` | Show whether credentials are present. |
 | `pec auth logout` | Delete saved credentials and the encryption key. |
 | `pec list [--folder F] [--unread] [--from YYYY-MM-DD] [--limit N]` | List PEC messages (default folder `inbox`, default limit 20). |
-| `pec get <id> [--save-attachments] [--out DIR]` | Fetch a single PEC by IMAP UID. |
+| `pec get <id> [--folder F] [--save-attachments DIR]` | Fetch a single PEC by IMAP UID; optionally save attachments to `DIR`. |
 | `pec send --to ADDR --subject S (--body T | --file F) [--attach F] [--cc ADDR] [--dry-run]` | Send a PEC; `--to`, `--cc`, `--attach` are repeatable. |
 
 ### Global flags
@@ -96,6 +97,8 @@ These work in any position (before or after the subcommand):
 | Legalmail (InfoCert) | `legalmail`  | `imapmail.legalmail.it:993`   | `smtpmail.legalmail.it:465`   |
 | Namirial             | `namirial`   | `imap.namirialpec.it:993`     | `smtp.namirialpec.it:465`     |
 | Register.it          | `register`   | `imap.pec.register.it:993`    | `smtp.pec.register.it:465`    |
+| Poste Italiane       | `poste`      | `imappec.poste.it:993`        | `smtppec.poste.it:465`        |
+| Pec.it               | `pec.it`     | `imap.pec.it:993`             | `smtp.pec.it:465`             |
 
 All providers use implicit SSL/TLS (IMAPS:993 / SMTPS:465). Username is the
 full PEC address; the password is the one provided by the PEC provider.
@@ -141,10 +144,15 @@ when present, and read/attachment flags.
 
 ### What `pec get` returns
 
-The full message — headers, plain-text body (and HTML with `--verbose`),
-plus the attachment list. By default the certification XMLs are filtered
-out; pass `--verbose` to include them or `--save-attachments` to write
-everything to disk under `./attachments/` (override with `--out DIR`).
+The full message — `from`, `to`, `cc`, `subject`, `date`, plain-text body
+(HTML body too with `--verbose`), and the attachment list with each
+attachment's filename and size in bytes.
+
+By default the PEC certification files (`daticert.xml`, `postacert.eml`,
+`smime.p7s`, `smime.p7m`) are filtered out of both the listed attachments
+and the saved files; pass `--verbose` to include them. Use
+`--save-attachments DIR` to write attachments to disk under `DIR`
+(created if it doesn't exist).
 
 ## Development
 

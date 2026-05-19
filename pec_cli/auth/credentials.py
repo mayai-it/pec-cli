@@ -62,6 +62,20 @@ PROVIDERS: dict[str, ProviderConfig] = {
         smtp_host="smtp.pec.register.it",
         smtp_port=465,
     ),
+    "poste": ProviderConfig(
+        name="poste",
+        imap_host="imappec.poste.it",
+        imap_port=993,
+        smtp_host="smtppec.poste.it",
+        smtp_port=465,
+    ),
+    "pec.it": ProviderConfig(
+        name="pec.it",
+        imap_host="imap.pec.it",
+        imap_port=993,
+        smtp_host="smtp.pec.it",
+        smtp_port=465,
+    ),
 }
 
 

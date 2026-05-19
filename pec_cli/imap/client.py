@@ -16,9 +16,9 @@ import imaplib
 import ssl
 import sys
 import time
+from collections.abc import Iterable
 from email.header import decode_header, make_header
 from email.message import Message as EmailMessage
-from typing import Iterable
 
 from pec_cli.auth import Credentials
 from pec_cli.models import Attachment, Message, MessageSummary

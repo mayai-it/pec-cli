@@ -5,7 +5,7 @@
     pec auth logout
 
     pec list [--folder inbox|sent] [--unread] [--from YYYY-MM-DD] [--limit N]
-    pec get <id> [--save-attachments] [--out DIR]
+    pec get <id> [--folder F] [--save-attachments DIR]
 
     pec send --to <addr>... --subject <s> --body <text>
     pec send --to <addr>... --subject <s> --file body.txt --attach doc.pdf
@@ -33,7 +33,6 @@ from pec_cli.imap import IMAPClient, IMAPError
 from pec_cli.models.message import _is_cert_attachment
 from pec_cli.output import emit, error
 from pec_cli.smtp import SMTPError, send_pec
-
 
 # ---------------------------------------------------------------------------
 # Shared CLI context + flag plumbing
@@ -112,7 +111,7 @@ def auth() -> None: ...
     "--provider",
     required=True,
     type=click.Choice(sorted(PROVIDERS.keys()), case_sensitive=False),
-    help="PEC provider preset (aruba, legalmail, namirial, register).",
+    help="PEC provider preset (aruba, legalmail, namirial, register, poste, pec.it).",
 )
 @common_flags
 @pass_ctx
@@ -245,15 +244,10 @@ def list_messages(
 )
 @click.option(
     "--save-attachments",
-    is_flag=True,
-    help="Save attachments to disk (default ./attachments/).",
-)
-@click.option(
-    "--out",
+    "save_dir",
     type=click.Path(file_okay=False, path_type=Path),
-    default=Path("attachments"),
-    show_default=True,
-    help="Directory to write attachments into.",
+    default=None,
+    help="Save attachments to the given directory (e.g. ./attachments).",
 )
 @common_flags
 @pass_ctx
@@ -261,8 +255,7 @@ def get_message(
     ctx: CLIContext,
     message_id: str,
     folder: str,
-    save_attachments: bool,
-    out: Path,
+    save_dir: Path | None,
 ) -> None:
     creds = ctx.require_credentials()
 
@@ -275,14 +268,14 @@ def get_message(
         sys.exit(1)
 
     saved: list[str] = []
-    if save_attachments and message.attachments:
-        out.mkdir(parents=True, exist_ok=True)
+    if save_dir is not None and message.attachments:
+        save_dir.mkdir(parents=True, exist_ok=True)
         for att in message.attachments:
             if not ctx.verbose and _is_cert_attachment(att):
                 continue
             if att.data is None:
                 continue
-            target = _safe_attachment_path(out, att.filename)
+            target = _safe_attachment_path(save_dir, att.filename)
             target.write_bytes(att.data)
             saved.append(str(target))
 
