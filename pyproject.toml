@@ -58,6 +58,7 @@ dependencies = [
     "click>=8.1.0",
     "cryptography>=42.0.0",
     "keyring>=24.0.0",
+    "mcp>=1.2.0",
 ]
 
 [project.optional-dependencies]
@@ -70,6 +71,7 @@ dev = [
 
 [project.scripts]
 pec = "pec_cli.main:cli"
+pec-mcp = "pec_cli.mcp_server:main"
 
 [project.urls]
 Homepage = "https://mayai.it"

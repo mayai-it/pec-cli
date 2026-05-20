@@ -40,6 +40,38 @@ For local development (adds `pytest`, `ruff`):
 make dev
 ```
 
+## MCP Server
+
+pec-cli ships with a native MCP server, letting AI agents like Claude access your PEC inbox directly — no subprocess, no JSON parsing.
+
+![MCP demo](docs/mcp-demo.png)
+
+### Setup with Claude Desktop
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "pec": {
+      "command": "/path/to/pec-mcp"
+    }
+  }
+}
+```
+
+Find your path with: `which pec-mcp`
+
+### Available tools
+
+| Tool | Description |
+|------|-------------|
+| `pec_list` | List messages (folder, unread_only, limit) |
+| `pec_get` | Get full message with body and cert |
+| `pec_send` | Send a PEC |
+| `pec_trace` | Trace receipt chain by message ID |
+| `pec_auth_status` | Check authentication status |
+
 ## Quick start
 
 ```bash
