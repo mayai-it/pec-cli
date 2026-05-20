@@ -62,6 +62,20 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 Find your path with: `which pec-mcp`
 
+### Compatible MCP clients
+
+pec-cli's MCP server works with any client that supports the MCP stdio transport:
+
+| Client | Status |
+|--------|--------|
+| Claude Desktop | ✅ Tested |
+| Cursor | ✅ Same stdio config |
+| Continue (VS Code) | ✅ Same stdio config |
+| Zed | ✅ Same stdio config |
+| ChatGPT | ⏳ MCP support coming soon |
+
+For clients other than Claude Desktop, the configuration format is typically the same — point the client to the `pec-mcp` executable via stdio.
+
 ### Available tools
 
 | Tool | Description |
