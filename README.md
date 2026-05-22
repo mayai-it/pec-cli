@@ -1,3 +1,7 @@
+[![PyPI version](https://img.shields.io/pypi/v/mayai-pec-cli.svg)](https://pypi.org/project/mayai-pec-cli/)
+[![Python versions](https://img.shields.io/pypi/pyversions/mayai-pec-cli.svg)](https://pypi.org/project/mayai-pec-cli/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Built for AI agents](https://img.shields.io/badge/Built%20for-AI%20agents-purple)](https://mayai.it)
 # pec-cli
 
 Command-line client for **PEC** (Posta Elettronica Certificata — Italian
@@ -9,7 +13,30 @@ Talks to the standard IMAP/SMTP endpoints exposed by Italian PEC providers
 (Aruba, Legalmail/InfoCert, Namirial, Register.it, Poste Italiane, Pec.it),
 all over SSL/TLS.
 
-Part of [MayAI CLI](https://mayai.it).
+## Why this exists
+
+PEC (Posta Elettronica Certificata) is the legal-email standard for Italian 
+businesses and professionals — used daily for invoices, official notices, 
+contracts, public administration communications. Every Italian SME has one.
+
+But programmatic access is fragmented: each provider (Aruba, Poste, 
+Legalmail, Namirial, ...) ships its own SDK or webmail-only interface. 
+Open-source tools that let AI agents send, receive, and track PEC messages 
+are essentially non-existent.
+
+`pec-cli` fills that gap:
+
+- 🤖 **Agent-friendly**: NDJSON output, stable exit codes, errors on stderr 
+  — pipe it into Claude, jq, or any LLM workflow.
+- 👤 **Human-friendly**: compact text output, one command per common task 
+  (send, list, fetch, trace).
+- 🇮🇹 **Italian-native**: built for the way Italian businesses actually 
+  use PEC — formal communications, legal evidence, document workflows.
+- 📬 **Provider-aware**: [scrivi qui i provider supportati, es. "supports 
+  Aruba PEC and Poste PEC out of the box, with a clean abstraction for 
+  adding more"].
+
+Part of [MayAI](https://mayai.it).
 
 ## Requirements
 
