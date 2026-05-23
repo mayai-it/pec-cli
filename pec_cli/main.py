@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import functools
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import click
 
@@ -69,20 +70,32 @@ class CLIContext:
 pass_ctx = click.make_pass_decorator(CLIContext)
 
 
-def common_flags(func):
-    """Re-declare root `--json` / `--verbose` so flag position doesn't matter."""
+_R = TypeVar("_R")
+
+
+def common_flags(func: Callable[..., _R]) -> Callable[..., _R]:
+    """Re-declare root `--json` / `--verbose` so flag position doesn't matter.
+
+    The wrapper consumes `_local_json` / `_local_verbose` injected by click
+    options below and forwards the rest to `func`, so the wrapped command
+    never sees flags it didn't declare. This signature swap is why the type
+    is `Callable[..., _R]` rather than a ParamSpec — the kwargs really do
+    change between caller and callee.
+    """
 
     @click.option("--json", "_local_json", is_flag=True, default=False,
                   help="Output one JSON object per line (NDJSON).")
     @click.option("--verbose", "_local_verbose", is_flag=True, default=False,
                   help="Log protocol details and timings to stderr.")
     @functools.wraps(func)
-    def wrapper(*args, _local_json: bool, _local_verbose: bool, **kwargs):
+    def wrapper(*args: Any, **kwargs: Any) -> _R:
+        local_json = kwargs.pop("_local_json", False)
+        local_verbose = kwargs.pop("_local_verbose", False)
         cli_ctx = click.get_current_context().find_object(CLIContext)
         if cli_ctx is not None:
-            if _local_json:
+            if local_json:
                 cli_ctx.as_json = True
-            if _local_verbose:
+            if local_verbose:
                 cli_ctx.verbose = True
         return func(*args, **kwargs)
 
@@ -363,7 +376,12 @@ def send(
         error("--body and --file are mutually exclusive")
         sys.exit(1)
 
-    body_text = body if body is not None else body_file.read_text(encoding="utf-8")
+    if body is not None:
+        body_text = body
+    else:
+        # The pair of guard-checks above prove body_file is not None here.
+        assert body_file is not None
+        body_text = body_file.read_text(encoding="utf-8")
 
     creds = ctx.require_credentials()
 

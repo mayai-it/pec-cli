@@ -29,9 +29,10 @@ jobs:
       - name: Lint
         run: ruff check pec_cli/ tests/
 
+      # mypy now blocking — the gradual-strictness config in pyproject.toml is
+      # at 0 errors and intentionally enforced from here on.
       - name: Type check
         run: mypy pec_cli/
-        continue-on-error: true   # Temporary: lower bar until cleanup prompt
 
       - name: Test
         run: pytest tests/ --cov=pec_cli --cov-report=xml --cov-report=term

@@ -19,6 +19,7 @@ import time
 from collections.abc import Iterable
 from email.header import decode_header, make_header
 from email.message import Message as EmailMessage
+from types import TracebackType
 
 from pec_cli.auth import Credentials
 from pec_cli.daticert import DatiCert, parse_daticert
@@ -36,10 +37,12 @@ def _decode(value: str | bytes | None) -> str:
     if value is None:
         return ""
     if isinstance(value, bytes):
+        # Bind to a bytes-typed local so mypy can narrow inside the except.
+        raw = value
         try:
-            value = value.decode("utf-8")
+            value = raw.decode("utf-8")
         except UnicodeDecodeError:
-            value = value.decode("latin-1", errors="replace")
+            value = raw.decode("latin-1", errors="replace")
     try:
         return str(make_header(decode_header(value)))
     except Exception:
@@ -53,11 +56,17 @@ def _parse_addr_list(value: str | None) -> list[str]:
 
 
 def _format_date(raw: str | None) -> str:
-    """Normalize the Date header to ISO 8601, falling back to the original."""
+    """Normalize the Date header to ISO 8601, falling back to the original.
+
+    `email.utils.parsedate_to_datetime` raises `ValueError` (Py 3.10+) on
+    malformed dates rather than returning None, so the fallback path is a
+    try/except — not an `is None` check.
+    """
     if not raw:
         return ""
-    parsed = email.utils.parsedate_to_datetime(raw)
-    if parsed is None:
+    try:
+        parsed = email.utils.parsedate_to_datetime(raw)
+    except (ValueError, TypeError):
         return _decode(raw)
     return parsed.isoformat()
 
@@ -85,7 +94,11 @@ def _walk_attachments(msg: EmailMessage, *, load_bytes: bool) -> list[Attachment
         if not filename:
             continue
         filename = _decode(filename)
-        payload = part.get_payload(decode=True) or b""
+        # `get_payload(decode=True)` is typed as `Message | bytes | Any | None`
+        # in typeshed, but in practice returns `bytes | None` for leaf parts
+        # (which is the only branch we reach here — multipart was skipped above).
+        raw = part.get_payload(decode=True)
+        payload: bytes = raw if isinstance(raw, bytes) else b""
         out.append(Attachment(
             filename=filename,
             content_type=part.get_content_type(),
@@ -120,7 +133,8 @@ def _extract_bodies(msg: EmailMessage) -> tuple[str, str | None]:
 
 
 def _decode_part(part: EmailMessage) -> str:
-    payload = part.get_payload(decode=True) or b""
+    raw = part.get_payload(decode=True)
+    payload: bytes = raw if isinstance(raw, bytes) else b""
     charset = part.get_content_charset() or "utf-8"
     try:
         return payload.decode(charset, errors="replace")
@@ -140,7 +154,12 @@ class IMAPClient:
         self.connect()
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         self.close()
 
     def connect(self) -> None:
@@ -221,7 +240,10 @@ class IMAPClient:
             criteria.append(f"SINCE {_imap_date(since)}")
         if not criteria:
             criteria.append("ALL")
-        typ, data = imap.uid("search", None, *criteria)
+        # `UID SEARCH` doesn't take a message set; pass criteria directly.
+        # (The previous `None` arg was stringified to "None" by imaplib and
+        # tolerated by lenient servers, but it's not protocol-correct.)
+        typ, data = imap.uid("search", *criteria)
         if typ != "OK":
             raise IMAPError(f"IMAP search failed: {data!r}")
         uids = (data[0] or b"").split()

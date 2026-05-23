@@ -2,6 +2,13 @@
 
 The MCP context object is opaque under the FastMCP runtime, so we build a
 minimal stub instead of running the real server lifespan.
+
+Why the `# type: ignore[arg-type]` lines below: the tool signature is
+`Context[ServerSession, AppContext]` from FastMCP, but we pass our duck-typed
+`_StubCtx` (same shape, no real session). Same reason for `imap=None` in the
+AppContext — `pec_send` doesn't touch the IMAP connection, only `pec_list` /
+`pec_get` / `pec_trace` do. The ignores are scoped to a specific mypy code so
+they don't hide unrelated regressions.
 """
 
 from __future__ import annotations

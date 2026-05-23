@@ -113,7 +113,7 @@ class Credentials:
 
 def _keyring_set(address: str, password: str) -> bool:
     try:
-        import keyring  # type: ignore[import-not-found]
+        import keyring
 
         keyring.set_password(KEYRING_SERVICE, address, password)
         # Some backends (e.g. `keyring.backends.fail.Keyring`) accept calls
@@ -126,7 +126,7 @@ def _keyring_set(address: str, password: str) -> bool:
 
 def _keyring_get(address: str) -> str | None:
     try:
-        import keyring  # type: ignore[import-not-found]
+        import keyring
 
         return keyring.get_password(KEYRING_SERVICE, address)
     except Exception:
@@ -135,8 +135,8 @@ def _keyring_get(address: str) -> str | None:
 
 def _keyring_delete(address: str) -> bool:
     try:
-        import keyring  # type: ignore[import-not-found]
-        import keyring.errors  # type: ignore[import-not-found]
+        import keyring
+        import keyring.errors
 
         try:
             keyring.delete_password(KEYRING_SERVICE, address)
