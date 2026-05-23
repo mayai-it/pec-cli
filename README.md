@@ -151,7 +151,27 @@ pec send --to dest@pec.it --subject "Oggetto" --file body.txt --attach doc.pdf
 | `pec list [--folder F] [--unread] [--from YYYY-MM-DD] [--limit N]` | List PEC messages (default folder `inbox`, default limit 20). |
 | `pec get <id> [--folder F] [--save-attachments DIR] [--cert]` | Fetch a single PEC by IMAP UID; `--cert` includes the parsed `daticert.xml` certification; `--save-attachments` writes attachments to `DIR`. |
 | `pec trace <message-id> [--folder F] [--limit N]` | Find every receipt in the folder whose `daticert.xml` references this message id, ordered chronologically (`accettazione` → `presa-in-carico` → `avvenuta-consegna` / `errore-consegna`). |
-| `pec send --to ADDR --subject S (--body T | --file F) [--attach F] [--cc ADDR] [--dry-run]` | Send a PEC; `--to`, `--cc`, `--attach` are repeatable. |
+| `pec send --to ADDR --subject S (--body T \| --file F) [--attach F] [--cc ADDR] [--dry-run] [--yes]` | Send a PEC; `--to`, `--cc`, `--attach` are repeatable. See safety note below. |
+
+### Safety note on `pec send`
+
+PEC has the legal value of a registered letter (raccomandata) under Italian
+law. To avoid accidental sends:
+
+- In an interactive TTY, `pec send` prompts for confirmation before contacting
+  SMTP.
+- In a non-TTY context (CI, pipes, scripts), `pec send` refuses to run unless
+  `--yes` is passed explicitly. Exit code is `3` if the safeguard fires.
+- `--dry-run` validates the message (recipient, body, attachments) and prints
+  what would be sent, without contacting SMTP.
+- The MCP tool `pec_send` requires `confirm_legal_send=True` and is
+  rate-limited to 3 sends per recipient per 5 minutes within a session.
+  Use `dry_run=True` for validation-only.
+
+Every send carries a deterministic `Message-ID` derived from
+`(from, to, cc, subject, body, minute-of-send)`, so an accidental immediate
+retry of the same content produces the same id (one logical email) — pair it
+with `pec trace` to follow the receipt chain.
 
 ### Global flags
 
@@ -170,6 +190,7 @@ These work in any position (before or after the subcommand):
 | `0` | Success |
 | `1` | Application error (network, send failure, bad arguments) |
 | `2` | Not authenticated — run `pec auth login` |
+| `3` | Refused to send: non-interactive shell without `--yes` |
 
 ## Supported providers
 
