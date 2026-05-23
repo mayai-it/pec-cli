@@ -173,6 +173,20 @@ Every send carries a deterministic `Message-ID` derived from
 retry of the same content produces the same id (one logical email) — pair it
 with `pec trace` to follow the receipt chain.
 
+### Resilience
+
+IMAP and SMTP operations automatically retry on transient network errors
+(socket timeouts, connection resets, server `[TRYAGAIN]` responses, SMTP
+4xx codes) with exponential backoff — `1s, 2s, 4s, ...` capped at 30s,
+max 3 retries (4 attempts total). Permanent failures (auth errors, SMTP
+5xx, nonexistent folders) propagate immediately without looping.
+
+SMTP retries preserve the deterministic Message-ID: the MIME envelope is
+built once, before the retry loop, and reused on every attempt. That way
+a PEC provider receiving the same Message-ID twice deduplicates it — one
+legal communication, not two. Pass `--verbose` to see retry events on
+stderr.
+
 ### Global flags
 
 These work in any position (before or after the subcommand):

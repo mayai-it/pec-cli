@@ -16,10 +16,36 @@ from email.message import EmailMessage
 from pathlib import Path
 
 from pec_cli.auth import Credentials
+from pec_cli.retry import with_retry_predicate
 
 
 class SMTPError(Exception):
     """Raised on SMTP login or send failures."""
+
+
+def _smtp_is_retriable(exc: BaseException) -> bool:
+    """Transient SMTP conditions worth retrying.
+
+    Order matters: `smtplib.SMTPException` inherits from `OSError` in the
+    stdlib, so we must check the SMTP-specific subclasses FIRST. Otherwise
+    a 5xx `SMTPResponseException` (and `SMTPAuthenticationError`, which is
+    a 5xx subclass) would be incorrectly classified as a transient
+    network error.
+
+    - `SMTPResponseException` with a 4xx code is "try again later" per
+      RFC 5321; 5xx codes are permanent and must NOT trigger a retry.
+    - `SMTPAuthenticationError` is a `SMTPResponseException` subclass with
+      5xx codes, so the 4xx check filters it out automatically.
+    - `SMTPServerDisconnected` is treated as transient — the server hung
+      up mid-session, the next attempt may land on a healthy worker.
+    - Plain `OSError` covers socket.timeout, ConnectionResetError, etc.
+    """
+    if isinstance(exc, smtplib.SMTPResponseException):
+        return 400 <= exc.smtp_code < 500
+    if isinstance(exc, smtplib.SMTPServerDisconnected):
+        return True
+    # Bare OSError check goes LAST so the SMTP subclasses above run first.
+    return isinstance(exc, OSError) and not isinstance(exc, smtplib.SMTPException)
 
 
 def _build_message_id(
@@ -92,7 +118,13 @@ def send_pec(
     recipients = list(to) + list(cc or [])
 
     t0 = time.monotonic()
-    try:
+
+    # CRITICAL: `msg` (incl. its deterministic Message-ID) is built ONCE
+    # above and reused across retries. Reconstructing the MIME inside the
+    # retry callable would shift the minute-bucket and mint a new
+    # Message-ID, defeating provider-side deduplication and producing
+    # multiple legally-binding PECs from one logical send.
+    def _do_send() -> None:
         with smtplib.SMTP_SSL(
             pc.smtp_host, pc.smtp_port, context=ssl.create_default_context()
         ) as smtp:
@@ -100,6 +132,13 @@ def send_pec(
                 smtp.set_debuglevel(1)
             smtp.login(creds.address, creds.password)
             smtp.send_message(msg, from_addr=creds.address, to_addrs=recipients)
+
+    try:
+        with_retry_predicate(
+            _do_send,
+            is_retriable=_smtp_is_retriable,
+            operation_name=f"SMTP send to {pc.smtp_host}",
+        )
     except smtplib.SMTPAuthenticationError as exc:
         raise SMTPError(f"SMTP authentication failed: {exc}") from exc
     except smtplib.SMTPException as exc:

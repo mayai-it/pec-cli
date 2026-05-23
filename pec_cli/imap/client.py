@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import email
 import email.utils
+import functools
 import imaplib
 import ssl
 import sys
@@ -24,6 +25,37 @@ from types import TracebackType
 from pec_cli.auth import Credentials
 from pec_cli.daticert import DatiCert, parse_daticert
 from pec_cli.models import Attachment, Message, MessageSummary
+from pec_cli.retry import with_retry_predicate
+
+# Network-level transient errors worth retrying. `imaplib.IMAP4.abort` is
+# raised when the server hangs up mid-command; `OSError` covers
+# socket.timeout, ConnectionResetError, ConnectionRefusedError, etc.
+#
+# `imaplib.IMAP4.error` is intentionally NOT retried wholesale: it also
+# covers permanent failures like AUTHENTICATIONFAILED. We pick out the
+# transient subset via `_is_transient_imap_error()` below.
+_IMAP_NETWORK_RETRIABLE: tuple[type[BaseException], ...] = (
+    OSError,
+    imaplib.IMAP4.abort,
+)
+
+# Substrings that mark an IMAP4.error as transient (per RFC 5530 response
+# codes and common provider conventions). Anything else — AUTHENTICATIONFAILED,
+# NONEXISTENT, BAD, etc. — is permanent and propagates immediately.
+_IMAP_TRANSIENT_MARKERS = ("TRYAGAIN", "SERVERBUG", "UNAVAILABLE", "INUSE")
+
+
+def _is_transient_imap_error(exc: imaplib.IMAP4.error) -> bool:
+    msg = str(exc).upper()
+    return any(marker in msg for marker in _IMAP_TRANSIENT_MARKERS)
+
+
+def _imap_is_retriable(exc: BaseException) -> bool:
+    if isinstance(exc, _IMAP_NETWORK_RETRIABLE):
+        return True
+    if isinstance(exc, imaplib.IMAP4.error):
+        return _is_transient_imap_error(exc)
+    return False
 
 
 class IMAPError(Exception):
@@ -165,11 +197,19 @@ class IMAPClient:
     def connect(self) -> None:
         pc = self.creds.provider_config
         t0 = time.monotonic()
-        try:
+
+        def _op() -> None:
             self._imap = imaplib.IMAP4_SSL(
                 pc.imap_host, pc.imap_port, ssl_context=ssl.create_default_context()
             )
             self._imap.login(self.creds.address, self.creds.password)
+
+        try:
+            with_retry_predicate(
+                _op,
+                is_retriable=_imap_is_retriable,
+                operation_name=f"IMAP connect/login to {pc.imap_host}",
+            )
         except imaplib.IMAP4.error as exc:
             raise IMAPError(f"IMAP login failed: {exc}") from exc
         except OSError as exc:
@@ -215,7 +255,14 @@ class IMAPClient:
             candidates = (alias,)
         last_err = None
         for name in candidates:
-            typ, _ = imap.select(name, readonly=readonly)
+            # `functools.partial` avoids the lambda-default-arg trick (which
+            # mypy can't ascribe a type to) while still binding `name` for
+            # the closure across the loop.
+            typ, _ = with_retry_predicate(
+                functools.partial(imap.select, name, readonly=readonly),
+                is_retriable=_imap_is_retriable,
+                operation_name=f"IMAP select {name!r}",
+            )
             if typ == "OK":
                 if self.verbose:
                     sys.stderr.write(f"imap: selected folder {name!r}\n")
@@ -243,7 +290,11 @@ class IMAPClient:
         # `UID SEARCH` doesn't take a message set; pass criteria directly.
         # (The previous `None` arg was stringified to "None" by imaplib and
         # tolerated by lenient servers, but it's not protocol-correct.)
-        typ, data = imap.uid("search", *criteria)
+        typ, data = with_retry_predicate(
+            lambda: imap.uid("search", *criteria),
+            is_retriable=_imap_is_retriable,
+            operation_name="IMAP search",
+        )
         if typ != "OK":
             raise IMAPError(f"IMAP search failed: {data!r}")
         uids = (data[0] or b"").split()
@@ -259,11 +310,15 @@ class IMAPClient:
             return []
         imap = self._imap_or_raise()
         uid_set = ",".join(uids)
-        typ, raw = imap.uid(
-            "fetch",
-            uid_set,
-            "(FLAGS BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS "
-            "(DATE FROM TO CC SUBJECT X-RICEVUTA X-TRASPORTO)])",
+        typ, raw = with_retry_predicate(
+            lambda: imap.uid(
+                "fetch",
+                uid_set,
+                "(FLAGS BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS "
+                "(DATE FROM TO CC SUBJECT X-RICEVUTA X-TRASPORTO)])",
+            ),
+            is_retriable=_imap_is_retriable,
+            operation_name="IMAP fetch summaries",
         )
         if typ != "OK":
             raise IMAPError(f"IMAP fetch failed: {raw!r}")
@@ -272,7 +327,11 @@ class IMAPClient:
     def fetch_message(self, uid: str) -> Message:
         """Fetch a full message and parse it into a Message dataclass."""
         imap = self._imap_or_raise()
-        typ, raw = imap.uid("fetch", uid, "(BODY.PEEK[])")
+        typ, raw = with_retry_predicate(
+            lambda: imap.uid("fetch", uid, "(BODY.PEEK[])"),
+            is_retriable=_imap_is_retriable,
+            operation_name=f"IMAP fetch message {uid}",
+        )
         if typ != "OK" or not raw or raw[0] is None:
             raise IMAPError(f"could not fetch message {uid}")
         # imaplib returns [(b'UID ... {n}', b'<raw bytes>'), b')'] — find tuple

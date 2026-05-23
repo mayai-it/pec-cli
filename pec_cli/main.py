@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import functools
+import logging
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -117,6 +118,17 @@ def common_flags(func: Callable[..., _R]) -> Callable[..., _R]:
 @click.pass_context
 def cli(ctx: click.Context, as_json: bool, verbose: bool) -> None:
     ctx.obj = CLIContext(as_json=as_json, verbose=verbose)
+    if verbose:
+        # Surface retry events (and any other pec.* loggers) on stderr.
+        # WARNING-and-above is the right floor: retries are warnings, real
+        # errors raise as exceptions and don't go through logging.
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter("[pec] %(message)s"))
+        pec_logger = logging.getLogger("pec")
+        pec_logger.setLevel(logging.WARNING)
+        # Avoid stacking handlers if the cli is re-entered (e.g. in tests).
+        if not any(isinstance(h, logging.StreamHandler) for h in pec_logger.handlers):
+            pec_logger.addHandler(handler)
 
 
 # ---------------------------------------------------------------------------

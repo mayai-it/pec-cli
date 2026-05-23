@@ -35,6 +35,27 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   `mayai-pec-cli==0.1.0` PyPI release, so future releases can be diffed
   against a real tag instead of a free-floating commit.
 
+### Resilience
+- New `pec_cli/retry.py` module with `with_retry` and
+  `with_retry_predicate` helpers (stdlib only — no `tenacity`, no
+  `backoff` lib).
+- IMAP operations (`connect`, `select_folder`, `search`, `fetch_summaries`,
+  `fetch_message`) now retry on `OSError`, `imaplib.IMAP4.abort`, and
+  transient `IMAP4.error` (`TRYAGAIN`, `SERVERBUG`, `UNAVAILABLE`,
+  `INUSE`). Auth failures and other permanent errors propagate
+  immediately.
+- SMTP send retries on `OSError`, `SMTPServerDisconnected`, and
+  `SMTPResponseException` with 4xx codes. 5xx codes (including
+  `SMTPAuthenticationError`) propagate immediately. The MIME message is
+  built once before the retry loop so all attempts share the same
+  deterministic Message-ID — provider-side deduplication still works.
+- Retry events log to `pec.retry` at WARNING level; `--verbose` wires
+  them to stderr.
+- 24 new tests covering retry behavior (`test_retry.py`,
+  `test_imap_retry.py`, `test_smtp_retry.py`), including explicit
+  verification that the Message-ID is identical across consecutive
+  retries.
+
 ## [0.1.0] - 2026-05-18
 
 Initial release. See PyPI [`mayai-pec-cli==0.1.0`](https://pypi.org/project/mayai-pec-cli/0.1.0/).
