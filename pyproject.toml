@@ -57,8 +57,12 @@ classifiers = [
 dependencies = [
     "click>=8.1.0",
     "cryptography>=42.0.0",
+    "defusedxml>=0.7.1",
     "keyring>=24.0.0",
     "mcp>=1.2.0",
+    # mcp pulls starlette transitively (>=0.27). starlette<1.0.1 has
+    # PYSEC-2026-161 — pin direct so resolver picks a non-vulnerable version.
+    "starlette>=1.0.1",
 ]
 
 [project.optional-dependencies]

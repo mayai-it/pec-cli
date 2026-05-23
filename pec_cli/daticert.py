@@ -30,7 +30,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from xml.etree import ElementTree as ET
+from xml.etree.ElementTree import Element  # type only — parsing uses defusedxml
+
+from defusedxml.ElementTree import ParseError, fromstring
 
 KNOWN_TIPI = {
     "accettazione",
@@ -76,8 +78,8 @@ def parse_daticert(xml_bytes: bytes) -> DatiCert | None:
     if not xml_bytes:
         return None
     try:
-        root = ET.fromstring(xml_bytes)
-    except ET.ParseError:
+        root = fromstring(xml_bytes)
+    except ParseError:
         return None
     if root.tag != "postacert":
         return None
@@ -121,14 +123,14 @@ def parse_daticert(xml_bytes: bytes) -> DatiCert | None:
     )
 
 
-def _text(parent: ET.Element, tag: str) -> str:
+def _text(parent: Element, tag: str) -> str:
     el = parent.find(tag)
     if el is None or el.text is None:
         return ""
     return el.text.strip()
 
 
-def _format_data(data_el: ET.Element) -> str:
+def _format_data(data_el: Element) -> str:
     """Combine <giorno>DD/MM/YYYY</giorno><ora>HH:MM:SS</ora> + zona into ISO 8601."""
     giorno = _text(data_el, "giorno")
     ora = _text(data_el, "ora")
