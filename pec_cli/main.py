@@ -34,6 +34,16 @@ from pec_cli.models.message import _is_cert_attachment
 from pec_cli.output import emit, error
 from pec_cli.smtp import SMTPError, send_pec
 
+
+def _stdin_is_interactive() -> bool:
+    """Indirection so tests can stub out the TTY check.
+
+    `CliRunner` swaps `sys.stdin` to a `BytesIO`, so patching `sys.stdin.isatty`
+    after the runner takes over doesn't stick — but patching this function does.
+    """
+    return sys.stdin.isatty()
+
+
 # ---------------------------------------------------------------------------
 # Shared CLI context + flag plumbing
 # ---------------------------------------------------------------------------
@@ -327,6 +337,12 @@ def _safe_attachment_path(out_dir: Path, filename: str) -> Path:
     help="Attach a file (repeatable).",
 )
 @click.option("--dry-run", is_flag=True, help="Don't actually send — print what would be sent.")
+@click.option(
+    "--yes",
+    is_flag=True,
+    default=False,
+    help="Skip the interactive 'are you sure' prompt. Required when stdin is not a TTY.",
+)
 @common_flags
 @pass_ctx
 def send(
@@ -338,6 +354,7 @@ def send(
     body_file: Path | None,
     attachments: tuple[Path, ...],
     dry_run: bool,
+    yes: bool,
 ) -> None:
     if body is None and body_file is None:
         error("either --body or --file is required")
@@ -364,6 +381,29 @@ def send(
             as_json=ctx.as_json,
         )
         return
+
+    # PEC has the legal value of a registered letter — gate the send behind an
+    # explicit confirmation. Interactive TTY: prompt. Non-interactive: require
+    # --yes so a misconfigured script can't silently fire off a legal email.
+    if not yes:
+        if not _stdin_is_interactive():
+            error(
+                "non-interactive shell — pass --yes to confirm sending a PEC "
+                "(legally binding, equivalent to a registered letter)"
+            )
+            sys.exit(3)
+        recipients = ", ".join(to)
+        click.echo(
+            f"About to send a PEC to {recipients} (subject: {subject!r}).",
+            err=True,
+        )
+        click.echo(
+            "PEC has the legal value of a registered letter (raccomandata).",
+            err=True,
+        )
+        if not click.confirm("Confirm send?", default=False, err=True):
+            click.echo("Aborted.", err=True)
+            sys.exit(0)
 
     try:
         result = send_pec(

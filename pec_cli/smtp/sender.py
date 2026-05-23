@@ -6,6 +6,7 @@ on 587 — so we use smtplib.SMTP_SSL directly.
 
 from __future__ import annotations
 
+import hashlib
 import mimetypes
 import smtplib
 import ssl
@@ -19,6 +20,39 @@ from pec_cli.auth import Credentials
 
 class SMTPError(Exception):
     """Raised on SMTP login or send failures."""
+
+
+def _build_message_id(
+    *,
+    from_addr: str,
+    to: list[str],
+    cc: list[str] | None,
+    subject: str,
+    body: str,
+    minute_bucket: int | None = None,
+) -> str:
+    """Deterministic Message-ID for idempotency.
+
+    Same (from, to, cc, subject, body) sent within the same UTC minute yields
+    the same Message-ID — so an accidental retry doesn't show up as two
+    distinct legal communications. Distinct content or a later minute produce
+    a distinct ID, which is the intended semantic for a deliberate resend.
+    """
+    bucket = minute_bucket if minute_bucket is not None else int(time.time() // 60)
+    h = hashlib.sha256()
+    h.update(from_addr.encode("utf-8"))
+    for addr in sorted(to):
+        h.update(b"|to|")
+        h.update(addr.encode("utf-8"))
+    for addr in sorted(cc or []):
+        h.update(b"|cc|")
+        h.update(addr.encode("utf-8"))
+    h.update(b"|s|")
+    h.update(subject.encode("utf-8"))
+    h.update(b"|b|")
+    h.update(body.encode("utf-8", errors="replace"))
+    h.update(f"|t|{bucket}".encode())
+    return f"<{h.hexdigest()[:32]}@mayai-pec-cli>"
 
 
 def send_pec(
@@ -38,6 +72,10 @@ def send_pec(
     if cc:
         msg["Cc"] = ", ".join(cc)
     msg["Subject"] = subject
+    message_id = _build_message_id(
+        from_addr=creds.address, to=to, cc=cc, subject=subject, body=body
+    )
+    msg["Message-ID"] = message_id
     msg.set_content(body)
 
     for path in attachments or []:
@@ -72,11 +110,13 @@ def send_pec(
     if verbose:
         elapsed = (time.monotonic() - t0) * 1000
         sys.stderr.write(f"smtp: sent via {pc.smtp_host}:{pc.smtp_port} ({elapsed:.0f}ms)\n")
+        sys.stderr.write(f"smtp: message-id: {message_id}\n")
 
     return {
         "status": "sent",
         "to": to,
         "cc": cc or [],
         "subject": subject,
+        "message_id": message_id,
         "attachments": [Path(p).name for p in (attachments or [])],
     }

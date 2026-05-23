@@ -11,7 +11,9 @@ protocol. All diagnostics go to stderr.
 
 from __future__ import annotations
 
+import re
 import sys
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -25,6 +27,22 @@ from mcp.server.session import ServerSession
 from pec_cli.auth import Credentials, load_credentials
 from pec_cli.imap import IMAPClient, IMAPError
 from pec_cli.smtp import SMTPError, send_pec
+
+# In-process send log used to rate-limit `pec_send` within an MCP session.
+# Each entry: {"to": str, "sent_at": float (monotonic seconds)}.
+# Module-level on purpose — one MCP session = one process, so this is the
+# right scope. Reset for tests via _reset_session_send_log().
+_SESSION_SEND_LOG: list[dict[str, Any]] = []
+_RATE_LIMIT_WINDOW_SEC = 300  # 5 minutes
+_RATE_LIMIT_MAX_SENDS = 3
+
+
+def _reset_session_send_log() -> None:
+    """Test hook — clears the in-process send log."""
+    _SESSION_SEND_LOG.clear()
+
+
+_ADDR_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 @dataclass
@@ -137,20 +155,43 @@ def pec_send(
     subject: str,
     body: str,
     attachments: list[str] | None = None,
+    confirm_legal_send: bool = False,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Send a PEC message.
+    """Send a PEC (legally binding certified email).
+
+    ⚠️ This sends a real legal-equivalent email with cost and legal value
+    (equivalent to a registered letter under Italian law). The agent MUST
+    obtain explicit user consent before calling, and set
+    `confirm_legal_send=True`. Rate-limited to 3 PECs per recipient per 5
+    minutes within a single MCP session.
+
+    For testing without sending, use `dry_run=True` — the message is
+    validated (recipient format, attachment existence, non-empty body) and
+    the result is returned with `dry_run: true` but no SMTP call is made.
 
     Args:
         to: Recipient PEC addresses.
         subject: Subject line.
         body: Plain-text body.
         attachments: Optional list of file paths to attach.
+        confirm_legal_send: Must be True to actually send. Required even
+            in dry_run mode is OFF — the agent must acknowledge legal scope.
+        dry_run: If True, validate and return without contacting SMTP.
 
     Returns:
-        Dict with `status`, `to`, `cc`, `subject`, and `attachments` (filenames).
+        Dict with `status`, `to`, `cc`, `subject`, `message_id`, and
+        `attachments` (filenames). In dry_run mode also includes
+        `dry_run: true` and `validated: true`.
     """
+    # ----- Validation (runs even in dry_run) ---------------------------
     if not to:
         raise ToolError("`to` must contain at least one recipient address")
+    for addr in to:
+        if not _ADDR_RE.match(addr):
+            raise ToolError(f"invalid recipient address: {addr!r}")
+    if not body.strip():
+        raise ToolError("`body` must not be empty")
 
     paths: list[Path] = []
     for raw in attachments or []:
@@ -159,9 +200,43 @@ def pec_send(
             raise ToolError(f"attachment not found: {raw}")
         paths.append(p)
 
+    # ----- Dry run shortcut --------------------------------------------
+    if dry_run:
+        return {
+            "status": "dry-run",
+            "dry_run": True,
+            "validated": True,
+            "to": list(to),
+            "subject": subject,
+            "attachments": [p.name for p in paths],
+        }
+
+    # ----- Explicit legal-consent gate ---------------------------------
+    if not confirm_legal_send:
+        raise ToolError(
+            "PEC has the legal value of a registered letter (raccomandata). "
+            "Set confirm_legal_send=True to proceed. This must be confirmed "
+            "by the user, not the agent autonomously."
+        )
+
+    # ----- Rate limit (per-recipient, per-session) ---------------------
+    now = time.monotonic()
+    # Drop expired entries opportunistically.
+    _SESSION_SEND_LOG[:] = [
+        s for s in _SESSION_SEND_LOG if now - s["sent_at"] < _RATE_LIMIT_WINDOW_SEC
+    ]
+    for addr in to:
+        recent = [s for s in _SESSION_SEND_LOG if s["to"] == addr]
+        if len(recent) >= _RATE_LIMIT_MAX_SENDS:
+            raise ToolError(
+                f"Rate limit: {_RATE_LIMIT_MAX_SENDS} PECs to {addr} in the "
+                f"last {_RATE_LIMIT_WINDOW_SEC // 60} minutes. Aborting to "
+                "prevent accidental duplicates."
+            )
+
     creds = _app(ctx).creds
     try:
-        return send_pec(
+        result = send_pec(
             creds,
             to=list(to),
             subject=subject,
@@ -170,6 +245,11 @@ def pec_send(
         )
     except SMTPError as exc:
         raise ToolError(str(exc)) from exc
+
+    for addr in to:
+        _SESSION_SEND_LOG.append({"to": addr, "sent_at": now})
+
+    return result
 
 
 @mcp.tool()
