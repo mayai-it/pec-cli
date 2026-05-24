@@ -1,9 +1,12 @@
-[![CI](https://github.com/mayai-it/pec-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/mayai-it/pec-cli/actions/workflows/ci.yml)
 [![PyPI version](https://img.shields.io/pypi/v/mayai-pec-cli.svg)](https://pypi.org/project/mayai-pec-cli/)
 [![Python versions](https://img.shields.io/pypi/pyversions/mayai-pec-cli.svg)](https://pypi.org/project/mayai-pec-cli/)
-[![Checked with mypy](https://www.mypy-lang.org/static/mypy_badge.svg)](https://mypy-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Built for AI agents](https://img.shields.io/badge/Built%20for-AI%20agents-purple)](https://mayai.it)
+[![Tests](https://github.com/mayai-it/pec-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/mayai-it/pec-cli/actions/workflows/ci.yml)
+[![mypy](https://img.shields.io/badge/mypy-strict-blue)](https://mypy-lang.org/)
+[![Coverage](https://codecov.io/gh/mayai-it/pec-cli/branch/main/graph/badge.svg)](https://codecov.io/gh/mayai-it/pec-cli)
+[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-261230.svg)](https://github.com/astral-sh/ruff)
+[![Conventional Commits](https://img.shields.io/badge/Conventional%20Commits-1.0.0-yellow.svg)](https://conventionalcommits.org)
 
 > Italiano: [README.it.md](README.it.md) — versione ridotta.
 
