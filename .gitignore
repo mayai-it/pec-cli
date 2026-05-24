@@ -44,3 +44,8 @@ config.json
 
 # Attachments downloaded by `pec get --save-attachments`
 attachments/
+
+# Internal workflow / planning docs (not part of the shipped repo)
+AUDIT_BASELINE.md
+PROMPTS_CLAUDE_CODE.md
+UPGRADE_PLAN.md
