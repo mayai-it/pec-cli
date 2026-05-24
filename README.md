@@ -32,9 +32,6 @@ are essentially non-existent.
   (send, list, fetch, trace).
 - 🇮🇹 **Italian-native**: built for the way Italian businesses actually 
   use PEC — formal communications, legal evidence, document workflows.
-- 📬 **Provider-aware**: [scrivi qui i provider supportati, es. "supports 
-  Aruba PEC and Poste PEC out of the box, with a clean abstraction for 
-  adding more"].
 
 Part of [MayAI](https://mayai.it).
 
