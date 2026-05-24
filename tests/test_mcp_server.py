@@ -30,6 +30,11 @@ from pec_cli.mcp_server import (
     pec_auth_status,
     pec_get,
     pec_list,
+    pec_list_folders,
+    pec_mark_read,
+    pec_mark_unread,
+    pec_move,
+    pec_search,
     pec_send,
     pec_trace,
 )
@@ -404,3 +409,178 @@ def test_pec_auth_status_returns_account_info(fake_ctx_with_imap: _StubCtx) -> N
     assert out["address"] == "user@pec.it"
     assert out["provider"] == "aruba"
     assert "imap" in out and "smtp" in out
+
+
+# ---------------------------------------------------------------------------
+# pec_search
+# ---------------------------------------------------------------------------
+
+
+def test_pec_search_returns_summaries(fake_ctx_with_imap: _StubCtx) -> None:
+    imap = fake_ctx_with_imap.request_context.lifespan_context.imap
+    imap.search_by_field.return_value = ["1"]
+    imap.fetch_summaries.return_value = [
+        MessageSummary(
+            id="1",
+            date="2026-04-01T10:00:00",
+            from_addr="inps@pec.it",
+            to_addrs=["user@pec.it"],
+            subject="INPS",
+            pec_type=None,
+            unread=True,
+            has_attachments=False,
+        )
+    ]
+    out = pec_search(  # type: ignore[arg-type]
+        ctx=fake_ctx_with_imap, query="INPS"
+    )
+    assert len(out) == 1
+    assert out[0]["from"] == "inps@pec.it"
+
+
+def test_pec_search_forwards_field_and_from_date(
+    fake_ctx_with_imap: _StubCtx,
+) -> None:
+    imap = fake_ctx_with_imap.request_context.lifespan_context.imap
+    imap.search_by_field.return_value = []
+    imap.fetch_summaries.return_value = []
+    pec_search(  # type: ignore[arg-type]
+        ctx=fake_ctx_with_imap,
+        query="tax",
+        field="from",
+        from_date="2025-01-01",
+    )
+    imap.search_by_field.assert_called_once_with(
+        "tax", field="from", since="2025-01-01"
+    )
+
+
+def test_pec_search_propagates_imap_error_as_toolerror(
+    fake_ctx_with_imap: _StubCtx,
+) -> None:
+    imap = fake_ctx_with_imap.request_context.lifespan_context.imap
+    imap.search_by_field.side_effect = IMAPError("bad query")
+    with pytest.raises(ToolError, match="bad query"):
+        pec_search(  # type: ignore[arg-type]
+            ctx=fake_ctx_with_imap, query="x"
+        )
+
+
+# ---------------------------------------------------------------------------
+# pec_list_folders
+# ---------------------------------------------------------------------------
+
+
+def test_pec_list_folders_without_counts(fake_ctx_with_imap: _StubCtx) -> None:
+    imap = fake_ctx_with_imap.request_context.lifespan_context.imap
+    imap.list_folders.return_value = ["INBOX", "Sent"]
+    out = pec_list_folders(ctx=fake_ctx_with_imap)  # type: ignore[arg-type]
+    assert out == [{"name": "INBOX"}, {"name": "Sent"}]
+
+
+def test_pec_list_folders_with_counts(fake_ctx_with_imap: _StubCtx) -> None:
+    imap = fake_ctx_with_imap.request_context.lifespan_context.imap
+    imap.list_folders.return_value = ["INBOX", "Sent"]
+    imap.folder_status.side_effect = [
+        {"messages": 100, "unseen": 5},
+        {"messages": 50, "unseen": 0},
+    ]
+    out = pec_list_folders(  # type: ignore[arg-type]
+        ctx=fake_ctx_with_imap, include_counts=True
+    )
+    assert out[0] == {"name": "INBOX", "messages": 100, "unseen": 5}
+    assert out[1] == {"name": "Sent", "messages": 50, "unseen": 0}
+
+
+def test_pec_list_folders_handles_noselect_folder(
+    fake_ctx_with_imap: _StubCtx,
+) -> None:
+    imap = fake_ctx_with_imap.request_context.lifespan_context.imap
+    imap.list_folders.return_value = ["[PEC]"]
+    imap.folder_status.side_effect = IMAPError("Noselect")
+    out = pec_list_folders(  # type: ignore[arg-type]
+        ctx=fake_ctx_with_imap, include_counts=True
+    )
+    assert out == [{"name": "[PEC]", "messages": None, "unseen": None}]
+
+
+# ---------------------------------------------------------------------------
+# pec_mark_read / pec_mark_unread
+# ---------------------------------------------------------------------------
+
+
+def test_pec_mark_read_invokes_set_seen_true(
+    fake_ctx_with_imap: _StubCtx,
+) -> None:
+    imap = fake_ctx_with_imap.request_context.lifespan_context.imap
+    out = pec_mark_read(  # type: ignore[arg-type]
+        ctx=fake_ctx_with_imap, message_id=42
+    )
+    imap.select_folder.assert_called_once_with("INBOX", readonly=False)
+    imap.set_seen.assert_called_once_with("42", seen=True)
+    assert out == {
+        "message_id": 42,
+        "folder": "INBOX",
+        "action": "mark-read",
+        "success": True,
+    }
+
+
+def test_pec_mark_unread_invokes_set_seen_false(
+    fake_ctx_with_imap: _StubCtx,
+) -> None:
+    imap = fake_ctx_with_imap.request_context.lifespan_context.imap
+    out = pec_mark_unread(  # type: ignore[arg-type]
+        ctx=fake_ctx_with_imap, message_id=42
+    )
+    imap.set_seen.assert_called_once_with("42", seen=False)
+    assert out["action"] == "mark-unread"
+
+
+def test_pec_mark_read_propagates_imap_error(
+    fake_ctx_with_imap: _StubCtx,
+) -> None:
+    imap = fake_ctx_with_imap.request_context.lifespan_context.imap
+    imap.set_seen.side_effect = IMAPError("STORE failed")
+    with pytest.raises(ToolError, match="STORE failed"):
+        pec_mark_read(  # type: ignore[arg-type]
+            ctx=fake_ctx_with_imap, message_id=42
+        )
+
+
+# ---------------------------------------------------------------------------
+# pec_move
+# ---------------------------------------------------------------------------
+
+
+def test_pec_move_validates_destination_exists(
+    fake_ctx_with_imap: _StubCtx,
+) -> None:
+    imap = fake_ctx_with_imap.request_context.lifespan_context.imap
+    imap.folder_exists.return_value = False
+    with pytest.raises(ToolError, match="not found"):
+        pec_move(  # type: ignore[arg-type]
+            ctx=fake_ctx_with_imap,
+            message_id=42,
+            to_folder="Nonexistent",
+        )
+    imap.move_message.assert_not_called()
+
+
+def test_pec_move_returns_success_payload(fake_ctx_with_imap: _StubCtx) -> None:
+    imap = fake_ctx_with_imap.request_context.lifespan_context.imap
+    imap.folder_exists.return_value = True
+    out = pec_move(  # type: ignore[arg-type]
+        ctx=fake_ctx_with_imap,
+        message_id=42,
+        to_folder="Archive",
+    )
+    imap.select_folder.assert_called_once_with("INBOX", readonly=False)
+    imap.move_message.assert_called_once_with("42", "Archive")
+    assert out == {
+        "message_id": 42,
+        "from_folder": "INBOX",
+        "to_folder": "Archive",
+        "action": "move",
+        "success": True,
+    }

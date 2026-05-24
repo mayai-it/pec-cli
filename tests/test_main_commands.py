@@ -377,6 +377,231 @@ def test_trace_returns_empty_chain_when_no_match(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# search
+# ---------------------------------------------------------------------------
+
+
+def test_search_with_subject_field(
+    runner: CliRunner, creds: Credentials, imap_mock
+) -> None:
+    client, _cls = imap_mock
+    client.search_by_field.return_value = ["7"]
+    client.fetch_summaries.return_value = [
+        MessageSummary(
+            id="7",
+            date="2026-04-01T09:00:00",
+            from_addr="inps@pec.it",
+            to_addrs=["user@pec.it"],
+            subject="INPS notice",
+            pec_type=None,
+            unread=True,
+            has_attachments=False,
+        )
+    ]
+    with patch("pec_cli.main.load_credentials", return_value=creds):
+        result = runner.invoke(
+            cli, ["--json", "search", "INPS", "--field", "subject"]
+        )
+    assert result.exit_code == 0, result.output
+    client.search_by_field.assert_called_once_with("INPS", field="subject", since=None)
+    rows = [json.loads(line) for line in result.output.strip().splitlines()]
+    assert rows[0]["subject"] == "INPS notice"
+
+
+def test_search_with_all_field_default(
+    runner: CliRunner, creds: Credentials, imap_mock
+) -> None:
+    client, _cls = imap_mock
+    client.search_by_field.return_value = []
+    client.fetch_summaries.return_value = []
+    with patch("pec_cli.main.load_credentials", return_value=creds):
+        result = runner.invoke(cli, ["search", "tax"])
+    assert result.exit_code == 0
+    # Default field is "all".
+    client.search_by_field.assert_called_once_with("tax", field="all", since=None)
+
+
+def test_search_with_from_date_propagates(
+    runner: CliRunner, creds: Credentials, imap_mock
+) -> None:
+    client, _cls = imap_mock
+    client.search_by_field.return_value = []
+    client.fetch_summaries.return_value = []
+    with patch("pec_cli.main.load_credentials", return_value=creds):
+        result = runner.invoke(
+            cli, ["search", "INPS", "--from-date", "2026-04-01"]
+        )
+    assert result.exit_code == 0
+    client.search_by_field.assert_called_once_with(
+        "INPS", field="all", since="2026-04-01"
+    )
+
+
+def test_search_surfaces_imap_error_with_exit_1(
+    runner: CliRunner, creds: Credentials, imap_mock
+) -> None:
+    from pec_cli.imap.client import IMAPError
+
+    client, _cls = imap_mock
+    client.search_by_field.side_effect = IMAPError("server tired")
+    with patch("pec_cli.main.load_credentials", return_value=creds):
+        result = runner.invoke(cli, ["search", "anything"])
+    assert result.exit_code == 1
+    assert "server tired" in result.output
+
+
+# ---------------------------------------------------------------------------
+# list-folders
+# ---------------------------------------------------------------------------
+
+
+def test_list_folders_without_counts(
+    runner: CliRunner, creds: Credentials, imap_mock
+) -> None:
+    client, _cls = imap_mock
+    client.list_folders.return_value = ["INBOX", "Sent", "[PEC]/Ricevute"]
+    with patch("pec_cli.main.load_credentials", return_value=creds):
+        result = runner.invoke(cli, ["--json", "list-folders"])
+    assert result.exit_code == 0, result.output
+    rows = [json.loads(line) for line in result.output.strip().splitlines()]
+    assert [r["name"] for r in rows] == ["INBOX", "Sent", "[PEC]/Ricevute"]
+
+
+def test_list_folders_with_counts_includes_messages_and_unseen(
+    runner: CliRunner, creds: Credentials, imap_mock
+) -> None:
+    client, _cls = imap_mock
+    client.list_folders.return_value = ["INBOX", "Sent"]
+    client.folder_status.side_effect = [
+        {"messages": 1234, "unseen": 47},
+        {"messages": 823, "unseen": 0},
+    ]
+    with patch("pec_cli.main.load_credentials", return_value=creds):
+        result = runner.invoke(cli, ["--json", "list-folders", "--counts"])
+    assert result.exit_code == 0, result.output
+    rows = [json.loads(line) for line in result.output.strip().splitlines()]
+    assert rows[0] == {"name": "INBOX", "messages": 1234, "unseen": 47}
+
+
+def test_list_folders_with_counts_handles_non_selectable_folder(
+    runner: CliRunner, creds: Credentials, imap_mock
+) -> None:
+    from pec_cli.imap.client import IMAPError
+
+    client, _cls = imap_mock
+    client.list_folders.return_value = ["[PEC]", "[PEC]/Ricevute"]
+    # `[PEC]` is a Noselect parent — status fails on it.
+    client.folder_status.side_effect = [
+        IMAPError("noselect"),
+        {"messages": 12, "unseen": 1},
+    ]
+    with patch("pec_cli.main.load_credentials", return_value=creds):
+        result = runner.invoke(cli, ["--json", "list-folders", "--counts"])
+    assert result.exit_code == 0, result.output
+    rows = [json.loads(line) for line in result.output.strip().splitlines()]
+    assert rows[0]["messages"] is None
+    assert rows[1]["messages"] == 12
+
+
+# ---------------------------------------------------------------------------
+# mark-read / mark-unread
+# ---------------------------------------------------------------------------
+
+
+def test_mark_read_calls_set_seen_true(
+    runner: CliRunner, creds: Credentials, imap_mock
+) -> None:
+    client, _cls = imap_mock
+    with patch("pec_cli.main.load_credentials", return_value=creds):
+        result = runner.invoke(cli, ["--json", "mark-read", "42"])
+    assert result.exit_code == 0, result.output
+    client.set_seen.assert_called_once_with("42", seen=True)
+    # Source folder must be opened read-write to STORE.
+    client.select_folder.assert_called_once_with("inbox", readonly=False)
+    payload = json.loads(result.output.strip())
+    assert payload["action"] == "mark-read"
+    assert payload["success"] is True
+
+
+def test_mark_unread_calls_set_seen_false(
+    runner: CliRunner, creds: Credentials, imap_mock
+) -> None:
+    client, _cls = imap_mock
+    with patch("pec_cli.main.load_credentials", return_value=creds):
+        result = runner.invoke(cli, ["--json", "mark-unread", "42"])
+    assert result.exit_code == 0, result.output
+    client.set_seen.assert_called_once_with("42", seen=False)
+
+
+def test_mark_read_idempotent_when_imap_returns_ok(
+    runner: CliRunner, creds: Credentials, imap_mock
+) -> None:
+    """Calling mark-read on an already-seen message succeeds silently —
+    IMAP STORE +FLAGS is idempotent by spec."""
+    client, _cls = imap_mock
+    with patch("pec_cli.main.load_credentials", return_value=creds):
+        result = runner.invoke(cli, ["mark-read", "42"])
+        result2 = runner.invoke(cli, ["mark-read", "42"])
+    assert result.exit_code == 0
+    assert result2.exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# move
+# ---------------------------------------------------------------------------
+
+
+def test_move_validates_destination_exists(
+    runner: CliRunner, creds: Credentials, imap_mock
+) -> None:
+    client, _cls = imap_mock
+    client.folder_exists.return_value = False
+    with patch("pec_cli.main.load_credentials", return_value=creds):
+        result = runner.invoke(
+            cli, ["move", "42", "--to", "Nonexistent"]
+        )
+    assert result.exit_code == 1
+    assert "not found" in result.output
+    client.move_message.assert_not_called()
+
+
+def test_move_uses_move_message_on_existing_destination(
+    runner: CliRunner, creds: Credentials, imap_mock
+) -> None:
+    client, _cls = imap_mock
+    client.folder_exists.return_value = True
+    with patch("pec_cli.main.load_credentials", return_value=creds):
+        result = runner.invoke(
+            cli, ["--json", "move", "42", "--to", "Archive"]
+        )
+    assert result.exit_code == 0, result.output
+    client.select_folder.assert_called_once_with("inbox", readonly=False)
+    client.move_message.assert_called_once_with("42", "Archive")
+    payload = json.loads(result.output.strip())
+    assert payload["action"] == "move"
+    assert payload["to_folder"] == "Archive"
+
+
+def test_move_with_custom_from_folder(
+    runner: CliRunner, creds: Credentials, imap_mock
+) -> None:
+    client, _cls = imap_mock
+    client.folder_exists.return_value = True
+    with patch("pec_cli.main.load_credentials", return_value=creds):
+        result = runner.invoke(
+            cli,
+            ["move", "42", "--to", "Archive", "--from", "Sent"],
+        )
+    assert result.exit_code == 0
+    client.select_folder.assert_called_once_with("Sent", readonly=False)
+
+
+# ---------------------------------------------------------------------------
+# Verbose / logging
+# ---------------------------------------------------------------------------
+
+
 def test_verbose_flag_enables_pec_logging_handler() -> None:
     """When --verbose is passed, a StreamHandler is attached to the pec logger."""
     import logging

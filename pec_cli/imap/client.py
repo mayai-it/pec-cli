@@ -274,22 +274,13 @@ class IMAPClient:
     # Searching / listing
     # ------------------------------------------------------------------
 
-    def search(self, *, unread: bool = False, since: str | None = None) -> list[str]:
-        """Return UIDs (as strings) matching the filters, newest last.
-
-        `since` is YYYY-MM-DD; converted to IMAP's `DD-Mon-YYYY` form.
-        """
+    def _raw_search(self, criteria: list[str]) -> list[str]:
+        """Low-level UID SEARCH with arbitrary criteria. Returns UIDs as
+        strings, oldest first (server ordering)."""
         imap = self._imap_or_raise()
-        criteria: list[str] = []
-        if unread:
-            criteria.append("UNSEEN")
-        if since:
-            criteria.append(f"SINCE {_imap_date(since)}")
         if not criteria:
-            criteria.append("ALL")
+            criteria = ["ALL"]
         # `UID SEARCH` doesn't take a message set; pass criteria directly.
-        # (The previous `None` arg was stringified to "None" by imaplib and
-        # tolerated by lenient servers, but it's not protocol-correct.)
         typ, data = with_retry_predicate(
             lambda: imap.uid("search", *criteria),
             is_retriable=_imap_is_retriable,
@@ -299,6 +290,170 @@ class IMAPClient:
             raise IMAPError(f"IMAP search failed: {data!r}")
         uids = (data[0] or b"").split()
         return [u.decode("ascii") for u in uids]
+
+    def search(self, *, unread: bool = False, since: str | None = None) -> list[str]:
+        """Return UIDs matching the filters, newest last.
+
+        `since` is YYYY-MM-DD; converted to IMAP's `DD-Mon-YYYY` form.
+        """
+        criteria: list[str] = []
+        if unread:
+            criteria.append("UNSEEN")
+        if since:
+            criteria.append(f"SINCE {_imap_date(since)}")
+        return self._raw_search(criteria)
+
+    def search_by_field(
+        self,
+        query: str,
+        *,
+        field: str = "all",
+        since: str | None = None,
+    ) -> list[str]:
+        """Search messages by text in a header/body field.
+
+        `field` is one of `subject`, `from`, `body`, `all`. `all` matches
+        any of the three (IMAP `OR SUBJECT q OR FROM q BODY q`). The query
+        is passed as a single quoted token, so spaces and unicode are fine.
+        """
+        f = field.lower()
+        criteria: list[str] = []
+        # IMAP SEARCH treats each space-separated arg as a token; imaplib
+        # quotes strings containing spaces automatically. We pass the query
+        # as one positional arg per criterion so it stays one IMAP token.
+        if f == "subject":
+            criteria += ["SUBJECT", query]
+        elif f == "from":
+            criteria += ["FROM", query]
+        elif f == "body":
+            criteria += ["BODY", query]
+        elif f == "all":
+            # OR is right-associative in IMAP: `OR a b` matches a OR b.
+            # `OR SUBJECT q OR FROM q BODY q` = subject ∪ from ∪ body.
+            criteria += [
+                "OR", "SUBJECT", query,
+                "OR", "FROM", query,
+                "BODY", query,
+            ]
+        else:
+            raise IMAPError(f"unknown search field {field!r}")
+        if since:
+            criteria += ["SINCE", _imap_date(since)]
+        return self._raw_search(criteria)
+
+    # ------------------------------------------------------------------
+    # Folder listing and status
+    # ------------------------------------------------------------------
+
+    def list_folders(self) -> list[str]:
+        """Return folder names available on the server (`LIST "" "*"`)."""
+        imap = self._imap_or_raise()
+        typ, data = with_retry_predicate(
+            lambda: imap.list(),
+            is_retriable=_imap_is_retriable,
+            operation_name="IMAP list folders",
+        )
+        if typ != "OK":
+            raise IMAPError(f"IMAP list failed: {data!r}")
+        return _parse_list_response(data)
+
+    def folder_status(self, name: str) -> dict[str, int]:
+        """Return `{messages, unseen}` counts for `name`.
+
+        Folder names with spaces or non-ASCII characters are quoted.
+        Returns 0 counts if the server replies OK but with an empty list.
+        """
+        imap = self._imap_or_raise()
+        # IMAP STATUS uses literal item names: (MESSAGES UNSEEN)
+        typ, data = with_retry_predicate(
+            lambda: imap.status(_quote_folder(name), "(MESSAGES UNSEEN)"),
+            is_retriable=_imap_is_retriable,
+            operation_name=f"IMAP status {name!r}",
+        )
+        if typ != "OK":
+            raise IMAPError(f"IMAP status failed: {data!r}")
+        raw = data[0] if data else None
+        if not isinstance(raw, bytes):
+            return {"messages": 0, "unseen": 0}
+        text = raw.decode("ascii", errors="replace")
+        return {
+            "messages": int(_extract_token(text, "MESSAGES") or "0"),
+            "unseen": int(_extract_token(text, "UNSEEN") or "0"),
+        }
+
+    def folder_exists(self, name: str) -> bool:
+        """Cheap existence check — `STATUS` succeeds only if the folder is
+        selectable. Wraps the IMAP error so callers don't have to know
+        which exception class signals 'no such mailbox'."""
+        try:
+            self.folder_status(name)
+        except IMAPError:
+            return False
+        return True
+
+    # ------------------------------------------------------------------
+    # Flag operations and message moves
+    # ------------------------------------------------------------------
+
+    def set_seen(self, uid: str, *, seen: bool) -> None:
+        """Toggle the `\\Seen` flag on a message. Idempotent — calling it
+        twice with the same value is a no-op from the user's perspective."""
+        imap = self._imap_or_raise()
+        op = "+FLAGS" if seen else "-FLAGS"
+        typ, data = with_retry_predicate(
+            lambda: imap.uid("STORE", uid, op, "(\\Seen)"),
+            is_retriable=_imap_is_retriable,
+            operation_name=f"IMAP STORE {op} \\Seen on {uid}",
+        )
+        if typ != "OK":
+            raise IMAPError(f"IMAP STORE failed for uid {uid}: {data!r}")
+
+    def move_message(self, uid: str, dest: str) -> None:
+        """Move a message to `dest`. Uses IMAP `MOVE` (RFC 6851) when the
+        server supports it, otherwise falls back to `COPY` + `STORE
+        \\Deleted` + `EXPUNGE`.
+
+        Caller must have selected the source folder (NOT read-only) first.
+        """
+        imap = self._imap_or_raise()
+        dest_quoted = _quote_folder(dest)
+
+        # Try MOVE first.
+        try:
+            typ, data = with_retry_predicate(
+                lambda: imap.uid("MOVE", uid, dest_quoted),
+                is_retriable=_imap_is_retriable,
+                operation_name=f"IMAP MOVE {uid} → {dest!r}",
+            )
+            if typ == "OK":
+                return
+            # Non-OK without an exception → fall through to copy+delete.
+        except imaplib.IMAP4.error:
+            # Server doesn't support MOVE — fall back.
+            pass
+
+        # Fallback: COPY + STORE +FLAGS (\Deleted) + EXPUNGE.
+        typ, data = with_retry_predicate(
+            lambda: imap.uid("COPY", uid, dest_quoted),
+            is_retriable=_imap_is_retriable,
+            operation_name=f"IMAP COPY {uid} → {dest!r}",
+        )
+        if typ != "OK":
+            raise IMAPError(f"IMAP COPY failed: {data!r}")
+        typ, data = with_retry_predicate(
+            lambda: imap.uid("STORE", uid, "+FLAGS", "(\\Deleted)"),
+            is_retriable=_imap_is_retriable,
+            operation_name=f"IMAP STORE \\Deleted on {uid}",
+        )
+        if typ != "OK":
+            raise IMAPError(f"IMAP STORE \\Deleted failed: {data!r}")
+        typ, data = with_retry_predicate(
+            lambda: imap.expunge(),
+            is_retriable=_imap_is_retriable,
+            operation_name="IMAP EXPUNGE",
+        )
+        if typ != "OK":
+            raise IMAPError(f"IMAP EXPUNGE failed: {data!r}")
 
     def fetch_summaries(self, uids: list[str]) -> list[MessageSummary]:
         """Fetch lightweight summaries for a batch of UIDs.
@@ -469,6 +624,52 @@ def _extract_parens(s: str, key: str) -> str | None:
             if depth == 0:
                 return s[start + 1:i]
     return None
+
+
+_FOLDER_NEEDS_QUOTING = set(' "\\()')
+
+
+def _quote_folder(name: str) -> str:
+    """Quote a folder name for IMAP if it contains chars that need escaping.
+
+    Pure ASCII names without special chars are passed through. Non-ASCII
+    names are quoted too; we don't bother with modified UTF-7 encoding
+    because the major Italian PEC providers use ASCII folder names.
+    """
+    if not any(ch in _FOLDER_NEEDS_QUOTING or ord(ch) > 127 for ch in name):
+        return name
+    escaped = name.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _parse_list_response(data: list) -> list[str]:
+    """Parse imaplib's `LIST` response into a list of folder names.
+
+    Each response line is like:
+        b'(\\HasNoChildren) "/" "INBOX"'
+        b'(\\Noselect \\HasChildren) "/" "[Gmail]"'
+    """
+    folders: list[str] = []
+    for raw in data:
+        if not isinstance(raw, bytes):
+            continue
+        line = raw.decode("utf-8", errors="replace")
+        # Strip the (\Flags) prefix and the delimiter to reach the name.
+        # Approach: take everything after the second double-quoted token,
+        # OR the last whitespace-separated token if no quotes (some servers).
+        try:
+            # Find the delimiter quoted token (usually "/" or ".").
+            close = line.index('"', line.index('"') + 1)
+            tail = line[close + 1:].strip()
+        except ValueError:
+            tail = line.rsplit(" ", 1)[-1]
+        # Tail is the folder name, possibly quoted.
+        tail = tail.strip()
+        if tail.startswith('"') and tail.endswith('"'):
+            tail = tail[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+        if tail:
+            folders.append(tail)
+    return folders
 
 
 def _bodystructure_has_attachments(bs: str) -> bool:

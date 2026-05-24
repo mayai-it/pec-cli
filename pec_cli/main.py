@@ -529,5 +529,196 @@ def trace(
     )
 
 
+# ---------------------------------------------------------------------------
+# search
+# ---------------------------------------------------------------------------
+
+
+@cli.command("search", help="Search messages by content.")
+@click.argument("query")
+@click.option(
+    "--folder",
+    default="inbox",
+    show_default=True,
+    help="Folder alias (inbox, sent) or raw IMAP folder name.",
+)
+@click.option(
+    "--field",
+    type=click.Choice(["subject", "from", "body", "all"], case_sensitive=False),
+    default="all",
+    show_default=True,
+    help="Field to match. 'all' matches SUBJECT or FROM or BODY.",
+)
+@click.option("--limit", type=int, default=20, show_default=True)
+@click.option(
+    "--from-date",
+    "from_date",
+    help="Only messages on/after this date (YYYY-MM-DD).",
+)
+@common_flags
+@pass_ctx
+def search_cmd(
+    ctx: CLIContext,
+    query: str,
+    folder: str,
+    field: str,
+    limit: int,
+    from_date: str | None,
+) -> None:
+    creds = ctx.require_credentials()
+
+    try:
+        with IMAPClient(creds, verbose=ctx.verbose) as client:
+            client.select_folder(folder)
+            uids = client.search_by_field(query, field=field, since=from_date)
+            uids = uids[-limit:][::-1] if limit else uids[::-1]
+            summaries = client.fetch_summaries(uids)
+    except IMAPError as exc:
+        error(str(exc))
+        sys.exit(1)
+
+    rows: list[dict[str, Any]] = []
+    for s in summaries:
+        row = s.to_dict()
+        if not ctx.verbose:
+            row.pop("to", None)
+        rows.append(row)
+
+    emit(rows, as_json=ctx.as_json)
+
+
+# ---------------------------------------------------------------------------
+# list-folders
+# ---------------------------------------------------------------------------
+
+
+@cli.command("list-folders", help="List available IMAP folders.")
+@click.option(
+    "--counts",
+    is_flag=True,
+    help="Include message and unseen counts for each folder.",
+)
+@common_flags
+@pass_ctx
+def list_folders_cmd(ctx: CLIContext, counts: bool) -> None:
+    creds = ctx.require_credentials()
+
+    try:
+        with IMAPClient(creds, verbose=ctx.verbose) as client:
+            names = client.list_folders()
+            if counts:
+                folders: list[dict[str, Any]] = []
+                for n in names:
+                    try:
+                        st = client.folder_status(n)
+                    except IMAPError:
+                        # Non-selectable folder — surface as null counts.
+                        folders.append({"name": n, "messages": None, "unseen": None})
+                        continue
+                    folders.append({"name": n, **st})
+            else:
+                folders = [{"name": n} for n in names]
+    except IMAPError as exc:
+        error(str(exc))
+        sys.exit(1)
+
+    emit(folders, as_json=ctx.as_json)
+
+
+# ---------------------------------------------------------------------------
+# mark-read / mark-unread
+# ---------------------------------------------------------------------------
+
+
+def _mark_seen(ctx: CLIContext, message_id: int, folder: str, *, seen: bool) -> None:
+    creds = ctx.require_credentials()
+    try:
+        with IMAPClient(creds, verbose=ctx.verbose) as client:
+            # Need a non-readonly select to issue STORE.
+            client.select_folder(folder, readonly=False)
+            client.set_seen(str(message_id), seen=seen)
+    except IMAPError as exc:
+        error(str(exc))
+        sys.exit(1)
+
+    emit(
+        {
+            "message_id": message_id,
+            "folder": folder,
+            "action": "mark-read" if seen else "mark-unread",
+            "success": True,
+        },
+        as_json=ctx.as_json,
+    )
+
+
+@cli.command("mark-read", help="Mark a message as read (\\Seen flag).")
+@click.argument("message_id", type=int)
+@click.option("--folder", default="inbox", show_default=True)
+@common_flags
+@pass_ctx
+def mark_read_cmd(ctx: CLIContext, message_id: int, folder: str) -> None:
+    _mark_seen(ctx, message_id, folder, seen=True)
+
+
+@cli.command("mark-unread", help="Mark a message as unread (clear \\Seen).")
+@click.argument("message_id", type=int)
+@click.option("--folder", default="inbox", show_default=True)
+@common_flags
+@pass_ctx
+def mark_unread_cmd(ctx: CLIContext, message_id: int, folder: str) -> None:
+    _mark_seen(ctx, message_id, folder, seen=False)
+
+
+# ---------------------------------------------------------------------------
+# move
+# ---------------------------------------------------------------------------
+
+
+@cli.command("move", help="Move a message between folders.")
+@click.argument("message_id", type=int)
+@click.option("--to", "to_folder", required=True, help="Destination folder.")
+@click.option(
+    "--from",
+    "from_folder",
+    default="inbox",
+    show_default=True,
+    help="Source folder.",
+)
+@common_flags
+@pass_ctx
+def move_cmd(
+    ctx: CLIContext,
+    message_id: int,
+    to_folder: str,
+    from_folder: str,
+) -> None:
+    creds = ctx.require_credentials()
+    try:
+        with IMAPClient(creds, verbose=ctx.verbose) as client:
+            if not client.folder_exists(to_folder):
+                error(
+                    f"folder {to_folder!r} not found. "
+                    "Run `pec list-folders` to see available folders."
+                )
+                sys.exit(1)
+            client.select_folder(from_folder, readonly=False)
+            client.move_message(str(message_id), to_folder)
+    except IMAPError as exc:
+        error(str(exc))
+        sys.exit(1)
+
+    emit(
+        {
+            "message_id": message_id,
+            "from_folder": from_folder,
+            "to_folder": to_folder,
+            "action": "move",
+            "success": True,
+        },
+        as_json=ctx.as_json,
+    )
+
+
 if __name__ == "__main__":
     cli()

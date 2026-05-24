@@ -514,3 +514,248 @@ def test_imap_client_operations_without_connect_raise(creds: Credentials) -> Non
     client = IMAPClient(creds)
     with pytest.raises(IMAPError, match="not connected"):
         client.search()
+
+
+# ---------------------------------------------------------------------------
+# search_by_field — OR criteria, SINCE, field routing
+# ---------------------------------------------------------------------------
+
+
+def test_search_by_field_subject_builds_subject_criterion(
+    creds: Credentials,
+) -> None:
+    fake_imap = _make_imap_mock()
+    fake_imap.uid.return_value = ("OK", [b""])
+    with patch("pec_cli.imap.client.imaplib.IMAP4_SSL", return_value=fake_imap):
+        client = IMAPClient(creds)
+        client.connect()
+        client.search_by_field("INPS", field="subject")
+    args = fake_imap.uid.call_args.args
+    assert args[0] == "search"
+    assert args[1:] == ("SUBJECT", "INPS")
+
+
+def test_search_by_field_all_builds_or_criteria(creds: Credentials) -> None:
+    fake_imap = _make_imap_mock()
+    fake_imap.uid.return_value = ("OK", [b""])
+    with patch("pec_cli.imap.client.imaplib.IMAP4_SSL", return_value=fake_imap):
+        client = IMAPClient(creds)
+        client.connect()
+        client.search_by_field("INPS", field="all")
+    args = fake_imap.uid.call_args.args
+    # OR SUBJECT q OR FROM q BODY q
+    assert args[1:] == (
+        "OR", "SUBJECT", "INPS", "OR", "FROM", "INPS", "BODY", "INPS",
+    )
+
+
+def test_search_by_field_with_since_appends_imap_date(creds: Credentials) -> None:
+    fake_imap = _make_imap_mock()
+    fake_imap.uid.return_value = ("OK", [b""])
+    with patch("pec_cli.imap.client.imaplib.IMAP4_SSL", return_value=fake_imap):
+        client = IMAPClient(creds)
+        client.connect()
+        client.search_by_field("hi", field="subject", since="2025-01-05")
+    args = fake_imap.uid.call_args.args
+    assert "SINCE" in args
+    assert "05-Jan-2025" in args
+
+
+def test_search_by_field_unknown_field_raises(creds: Credentials) -> None:
+    fake_imap = _make_imap_mock()
+    with patch("pec_cli.imap.client.imaplib.IMAP4_SSL", return_value=fake_imap):
+        client = IMAPClient(creds)
+        client.connect()
+        with pytest.raises(IMAPError, match="unknown search field"):
+            client.search_by_field("hi", field="cc")
+
+
+# ---------------------------------------------------------------------------
+# list_folders / folder_status / folder_exists
+# ---------------------------------------------------------------------------
+
+
+def test_list_folders_parses_list_response(creds: Credentials) -> None:
+    fake_imap = _make_imap_mock()
+    fake_imap.list.return_value = (
+        "OK",
+        [
+            b'(\\HasNoChildren) "/" "INBOX"',
+            b'(\\HasNoChildren) "/" "Sent"',
+            b'(\\HasChildren \\Noselect) "/" "[PEC]"',
+            b'(\\HasNoChildren) "/" "[PEC]/Ricevute"',
+        ],
+    )
+    with patch("pec_cli.imap.client.imaplib.IMAP4_SSL", return_value=fake_imap):
+        client = IMAPClient(creds)
+        client.connect()
+        folders = client.list_folders()
+    assert folders == ["INBOX", "Sent", "[PEC]", "[PEC]/Ricevute"]
+
+
+def test_folder_status_parses_messages_and_unseen(creds: Credentials) -> None:
+    fake_imap = _make_imap_mock()
+    fake_imap.status.return_value = (
+        "OK",
+        [b'"INBOX" (MESSAGES 1234 UNSEEN 47)'],
+    )
+    with patch("pec_cli.imap.client.imaplib.IMAP4_SSL", return_value=fake_imap):
+        client = IMAPClient(creds)
+        client.connect()
+        st = client.folder_status("INBOX")
+    assert st == {"messages": 1234, "unseen": 47}
+
+
+def test_folder_status_quotes_folder_with_spaces(creds: Credentials) -> None:
+    fake_imap = _make_imap_mock()
+    fake_imap.status.return_value = ("OK", [b'"x" (MESSAGES 0 UNSEEN 0)'])
+    with patch("pec_cli.imap.client.imaplib.IMAP4_SSL", return_value=fake_imap):
+        client = IMAPClient(creds)
+        client.connect()
+        client.folder_status("Posta inviata")
+    # Folder name contains a space → must be quoted per IMAP atom rules.
+    call_args = fake_imap.status.call_args.args
+    assert call_args[0].startswith('"') and call_args[0].endswith('"')
+
+
+def test_folder_status_passes_plain_atoms_unquoted(creds: Credentials) -> None:
+    """`[PEC]/Errori` is a valid IMAP atom — brackets and slash do NOT need
+    quoting per RFC 3501, so we don't add noise."""
+    fake_imap = _make_imap_mock()
+    fake_imap.status.return_value = ("OK", [b'"x" (MESSAGES 0 UNSEEN 0)'])
+    with patch("pec_cli.imap.client.imaplib.IMAP4_SSL", return_value=fake_imap):
+        client = IMAPClient(creds)
+        client.connect()
+        client.folder_status("[PEC]/Errori")
+    call_args = fake_imap.status.call_args.args
+    assert call_args[0] == "[PEC]/Errori"
+
+
+def test_folder_exists_true_when_status_succeeds(creds: Credentials) -> None:
+    fake_imap = _make_imap_mock()
+    fake_imap.status.return_value = ("OK", [b'"x" (MESSAGES 0 UNSEEN 0)'])
+    with patch("pec_cli.imap.client.imaplib.IMAP4_SSL", return_value=fake_imap):
+        client = IMAPClient(creds)
+        client.connect()
+        assert client.folder_exists("anything") is True
+
+
+def test_folder_exists_false_when_status_raises(creds: Credentials) -> None:
+    fake_imap = _make_imap_mock()
+    fake_imap.status.return_value = ("NO", [b"no such mailbox"])
+    with patch("pec_cli.imap.client.imaplib.IMAP4_SSL", return_value=fake_imap):
+        client = IMAPClient(creds)
+        client.connect()
+        assert client.folder_exists("nope") is False
+
+
+# ---------------------------------------------------------------------------
+# set_seen and move_message
+# ---------------------------------------------------------------------------
+
+
+def test_set_seen_true_uses_plus_flags(creds: Credentials) -> None:
+    fake_imap = _make_imap_mock()
+    fake_imap.uid.return_value = ("OK", [b"done"])
+    with patch("pec_cli.imap.client.imaplib.IMAP4_SSL", return_value=fake_imap):
+        client = IMAPClient(creds)
+        client.connect()
+        client.set_seen("42", seen=True)
+    args = fake_imap.uid.call_args.args
+    assert args == ("STORE", "42", "+FLAGS", "(\\Seen)")
+
+
+def test_set_seen_false_uses_minus_flags(creds: Credentials) -> None:
+    fake_imap = _make_imap_mock()
+    fake_imap.uid.return_value = ("OK", [b"done"])
+    with patch("pec_cli.imap.client.imaplib.IMAP4_SSL", return_value=fake_imap):
+        client = IMAPClient(creds)
+        client.connect()
+        client.set_seen("42", seen=False)
+    args = fake_imap.uid.call_args.args
+    assert args == ("STORE", "42", "-FLAGS", "(\\Seen)")
+
+
+def test_set_seen_raises_when_store_not_ok(creds: Credentials) -> None:
+    fake_imap = _make_imap_mock()
+    fake_imap.uid.return_value = ("NO", [b"bad"])
+    with patch("pec_cli.imap.client.imaplib.IMAP4_SSL", return_value=fake_imap):
+        client = IMAPClient(creds)
+        client.connect()
+        with pytest.raises(IMAPError, match="STORE failed"):
+            client.set_seen("42", seen=True)
+
+
+def test_move_message_uses_imap_move_when_ok(creds: Credentials) -> None:
+    fake_imap = _make_imap_mock()
+    fake_imap.uid.return_value = ("OK", [b"moved"])
+    with patch("pec_cli.imap.client.imaplib.IMAP4_SSL", return_value=fake_imap):
+        client = IMAPClient(creds)
+        client.connect()
+        client.move_message("42", "Archive")
+    # Only one uid() call — the MOVE — when supported.
+    assert fake_imap.uid.call_count == 1
+    args = fake_imap.uid.call_args.args
+    assert args[0] == "MOVE" and args[1] == "42" and "Archive" in args[2]
+
+
+def test_move_message_falls_back_to_copy_store_expunge_on_move_error(
+    creds: Credentials,
+) -> None:
+    fake_imap = _make_imap_mock()
+    # First call (MOVE) raises; subsequent COPY + STORE return OK.
+    fake_imap.uid.side_effect = [
+        imaplib.IMAP4.error("server doesn't support MOVE"),
+        ("OK", [b"copied"]),
+        ("OK", [b"flag set"]),
+    ]
+    fake_imap.expunge.return_value = ("OK", [b"expunged"])
+    with patch("pec_cli.imap.client.imaplib.IMAP4_SSL", return_value=fake_imap):
+        client = IMAPClient(creds)
+        client.connect()
+        client.move_message("42", "Archive")
+    # MOVE → COPY → STORE → EXPUNGE
+    assert fake_imap.uid.call_count == 3
+    assert fake_imap.expunge.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# folder-name quoting + LIST parser edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_parse_list_response_handles_quoted_names_with_spaces() -> None:
+    from pec_cli.imap.client import _parse_list_response
+
+    raw = [b'(\\HasNoChildren) "/" "Posta inviata"']
+    assert _parse_list_response(raw) == ["Posta inviata"]
+
+
+def test_parse_list_response_skips_non_bytes() -> None:
+    from pec_cli.imap.client import _parse_list_response
+
+    raw: list[object] = [None, b'(\\HasNoChildren) "/" "INBOX"']
+    assert _parse_list_response(raw) == ["INBOX"]
+
+
+def test_quote_folder_passes_through_ascii() -> None:
+    from pec_cli.imap.client import _quote_folder
+
+    assert _quote_folder("INBOX") == "INBOX"
+
+
+def test_quote_folder_escapes_names_with_spaces() -> None:
+    from pec_cli.imap.client import _quote_folder
+
+    out = _quote_folder("Posta inviata")
+    assert out == '"Posta inviata"'
+
+
+def test_quote_folder_escapes_embedded_quotes_and_backslashes() -> None:
+    from pec_cli.imap.client import _quote_folder
+
+    out = _quote_folder('weird "name" with \\backslash')
+    # Embedded `"` becomes `\"`, embedded `\` becomes `\\`, wrapped in quotes.
+    assert out.startswith('"') and out.endswith('"')
+    assert '\\"' in out
+    assert "\\\\" in out

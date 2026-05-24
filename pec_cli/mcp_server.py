@@ -307,6 +307,168 @@ def pec_trace(
 
 
 @mcp.tool()
+def pec_search(
+    ctx: Context[ServerSession, AppContext],
+    query: str,
+    folder: str = "INBOX",
+    field: str = "all",
+    limit: int = 20,
+    from_date: str | None = None,
+) -> list[dict[str, Any]]:
+    """Search PEC messages by content.
+
+    Args:
+        query: Free-text query.
+        folder: Folder alias (`inbox`, `sent`) or raw IMAP folder name.
+        field: One of `subject`, `from`, `body`, `all`. `all` matches the
+            query in subject, from, or body.
+        limit: Maximum number of results.
+        from_date: Optional ISO date `YYYY-MM-DD`; only messages on/after
+            this date are returned.
+
+    Returns:
+        List of message summaries (id, date, from, subject, pec_type,
+        unread, has_attachments), newest first.
+    """
+    imap = _app(ctx).imap
+    try:
+        imap.select_folder(folder)
+        uids = imap.search_by_field(query, field=field, since=from_date)
+        uids = uids[-limit:][::-1] if limit else uids[::-1]
+        summaries = imap.fetch_summaries(uids)
+    except IMAPError as exc:
+        raise ToolError(str(exc)) from exc
+
+    return [s.to_dict() for s in summaries]
+
+
+@mcp.tool()
+def pec_list_folders(
+    ctx: Context[ServerSession, AppContext],
+    include_counts: bool = False,
+) -> list[dict[str, Any]]:
+    """List available IMAP folders on the PEC account.
+
+    Args:
+        include_counts: When True, each entry also carries `messages` and
+            `unseen` counts. Non-selectable folders surface as null counts.
+
+    Returns:
+        List of `{name}` dicts, or `{name, messages, unseen}` when counts
+        are requested.
+    """
+    imap = _app(ctx).imap
+    try:
+        names = imap.list_folders()
+        if not include_counts:
+            return [{"name": n} for n in names]
+        out: list[dict[str, Any]] = []
+        for n in names:
+            try:
+                st = imap.folder_status(n)
+            except IMAPError:
+                out.append({"name": n, "messages": None, "unseen": None})
+                continue
+            out.append({"name": n, **st})
+        return out
+    except IMAPError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+def _mcp_set_seen(
+    ctx: Context[ServerSession, AppContext],
+    message_id: int,
+    folder: str,
+    *,
+    seen: bool,
+) -> dict[str, Any]:
+    imap = _app(ctx).imap
+    try:
+        imap.select_folder(folder, readonly=False)
+        imap.set_seen(str(message_id), seen=seen)
+    except IMAPError as exc:
+        raise ToolError(str(exc)) from exc
+    return {
+        "message_id": message_id,
+        "folder": folder,
+        "action": "mark-read" if seen else "mark-unread",
+        "success": True,
+    }
+
+
+@mcp.tool()
+def pec_mark_read(
+    ctx: Context[ServerSession, AppContext],
+    message_id: int,
+    folder: str = "INBOX",
+) -> dict[str, Any]:
+    """Mark a message as read (set the IMAP `\\Seen` flag).
+
+    Idempotent — calling it on an already-read message succeeds silently.
+
+    Args:
+        message_id: IMAP UID of the message.
+        folder: Folder alias or raw IMAP folder name.
+    """
+    return _mcp_set_seen(ctx, message_id, folder, seen=True)
+
+
+@mcp.tool()
+def pec_mark_unread(
+    ctx: Context[ServerSession, AppContext],
+    message_id: int,
+    folder: str = "INBOX",
+) -> dict[str, Any]:
+    """Mark a message as unread (clear the IMAP `\\Seen` flag).
+
+    Idempotent — calling it on an already-unread message succeeds silently.
+
+    Args:
+        message_id: IMAP UID of the message.
+        folder: Folder alias or raw IMAP folder name.
+    """
+    return _mcp_set_seen(ctx, message_id, folder, seen=False)
+
+
+@mcp.tool()
+def pec_move(
+    ctx: Context[ServerSession, AppContext],
+    message_id: int,
+    to_folder: str,
+    from_folder: str = "INBOX",
+) -> dict[str, Any]:
+    """Move a message between folders.
+
+    Validates the destination folder exists before attempting the move.
+    Uses IMAP `MOVE` (RFC 6851) if the server supports it, otherwise falls
+    back to `COPY` + `STORE \\Deleted` + `EXPUNGE`.
+
+    Args:
+        message_id: IMAP UID of the message.
+        to_folder: Destination folder name.
+        from_folder: Source folder name (default `INBOX`).
+    """
+    imap = _app(ctx).imap
+    try:
+        if not imap.folder_exists(to_folder):
+            raise ToolError(
+                f"folder {to_folder!r} not found. "
+                "Use pec_list_folders to see available folders."
+            )
+        imap.select_folder(from_folder, readonly=False)
+        imap.move_message(str(message_id), to_folder)
+    except IMAPError as exc:
+        raise ToolError(str(exc)) from exc
+    return {
+        "message_id": message_id,
+        "from_folder": from_folder,
+        "to_folder": to_folder,
+        "action": "move",
+        "success": True,
+    }
+
+
+@mcp.tool()
 def pec_auth_status(ctx: Context[ServerSession, AppContext]) -> dict[str, Any]:
     """Report which PEC account this server is bound to.
 
