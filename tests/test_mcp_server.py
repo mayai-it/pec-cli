@@ -15,17 +15,28 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
 
 from pec_cli.auth.credentials import Credentials
+from pec_cli.daticert import DatiCert
+from pec_cli.imap.client import IMAPError
 from pec_cli.mcp_server import (
     _RATE_LIMIT_MAX_SENDS,
     AppContext,
     _reset_session_send_log,
+    pec_auth_status,
+    pec_get,
+    pec_list,
     pec_send,
+    pec_trace,
+)
+from pec_cli.models.message import (
+    Attachment,
+    Message,
+    MessageSummary,
 )
 
 # ---------------------------------------------------------------------------
@@ -53,6 +64,16 @@ def fake_ctx() -> _StubCtx:
     creds = Credentials(address="user@pec.it", provider="aruba", password="secret")
     # imap=None: pec_send doesn't touch it; only pec_list/get/trace do.
     app = AppContext(creds=creds, imap=None)  # type: ignore[arg-type]
+    return _StubCtx(request_context=_StubRequestContext(lifespan_context=app))
+
+
+@pytest.fixture
+def fake_ctx_with_imap() -> _StubCtx:
+    """Variant whose AppContext carries a MagicMock IMAP client — used by
+    the read-tools (pec_list / pec_get / pec_trace)."""
+    creds = Credentials(address="user@pec.it", provider="aruba", password="secret")
+    imap = MagicMock()
+    app = AppContext(creds=creds, imap=imap)  # type: ignore[arg-type]
     return _StubCtx(request_context=_StubRequestContext(lifespan_context=app))
 
 
@@ -204,3 +225,182 @@ def test_pec_send_with_confirm_calls_smtp(fake_ctx: _StubCtx) -> None:
         )
     send_mock.assert_called_once()
     assert out["status"] == "sent"
+
+
+# ---------------------------------------------------------------------------
+# pec_list / pec_get / pec_trace / pec_auth_status — read tools
+# ---------------------------------------------------------------------------
+
+
+def test_pec_list_returns_dicts_from_summaries(fake_ctx_with_imap: _StubCtx) -> None:
+    imap = fake_ctx_with_imap.request_context.lifespan_context.imap
+    imap.search.return_value = ["1", "2"]
+    imap.fetch_summaries.return_value = [
+        MessageSummary(
+            id="2",
+            date="2026-03-21T10:00:00",
+            from_addr="alice@pec.it",
+            to_addrs=["bob@pec.it"],
+            subject="hi",
+            pec_type=None,
+            unread=True,
+            has_attachments=False,
+        ),
+    ]
+    out = pec_list(ctx=fake_ctx_with_imap)  # type: ignore[arg-type]
+    assert len(out) == 1
+    assert out[0]["from"] == "alice@pec.it"
+    imap.select_folder.assert_called_once_with("INBOX")
+
+
+def test_pec_list_propagates_imap_error_as_toolerror(
+    fake_ctx_with_imap: _StubCtx,
+) -> None:
+    imap = fake_ctx_with_imap.request_context.lifespan_context.imap
+    imap.select_folder.side_effect = IMAPError("no such mailbox")
+    with pytest.raises(ToolError, match="no such mailbox"):
+        pec_list(ctx=fake_ctx_with_imap)  # type: ignore[arg-type]
+
+
+def test_pec_list_respects_limit_and_unread_flags(
+    fake_ctx_with_imap: _StubCtx,
+) -> None:
+    imap = fake_ctx_with_imap.request_context.lifespan_context.imap
+    imap.search.return_value = [str(i) for i in range(50)]
+    imap.fetch_summaries.return_value = []
+    pec_list(ctx=fake_ctx_with_imap, unread_only=True, limit=5)  # type: ignore[arg-type]
+    imap.search.assert_called_once_with(unread=True)
+    # The slice passed to fetch_summaries must be the last 5 in newest-first order.
+    fetched_uids = imap.fetch_summaries.call_args.args[0]
+    assert len(fetched_uids) == 5
+    assert fetched_uids[0] == "49"  # newest
+
+
+def test_pec_get_returns_dict_for_existing_uid(
+    fake_ctx_with_imap: _StubCtx,
+) -> None:
+    imap = fake_ctx_with_imap.request_context.lifespan_context.imap
+    imap.fetch_message.return_value = Message(
+        id="7",
+        date="2026-03-21T10:00:00",
+        from_addr="alice@pec.it",
+        to_addrs=["bob@pec.it"],
+        cc_addrs=[],
+        subject="subj",
+        pec_type=None,
+        body_text="hi",
+        body_html=None,
+        attachments=[],
+        daticert=None,
+    )
+    out = pec_get(ctx=fake_ctx_with_imap, message_id=7)  # type: ignore[arg-type]
+    assert out["subject"] == "subj"
+    imap.fetch_message.assert_called_once_with("7")
+
+
+def test_pec_get_propagates_imap_error_as_toolerror(
+    fake_ctx_with_imap: _StubCtx,
+) -> None:
+    imap = fake_ctx_with_imap.request_context.lifespan_context.imap
+    imap.fetch_message.side_effect = IMAPError("not found")
+    with pytest.raises(ToolError, match="not found"):
+        pec_get(ctx=fake_ctx_with_imap, message_id=99)  # type: ignore[arg-type]
+
+
+def test_pec_trace_empty_target_raises(fake_ctx_with_imap: _StubCtx) -> None:
+    with pytest.raises(ToolError, match="empty"):
+        pec_trace(ctx=fake_ctx_with_imap, message_id="<>")  # type: ignore[arg-type]
+
+
+def test_pec_trace_returns_chain_for_matching_daticert(
+    fake_ctx_with_imap: _StubCtx,
+) -> None:
+    imap = fake_ctx_with_imap.request_context.lifespan_context.imap
+    imap.search.return_value = ["1"]
+    imap.fetch_summaries.return_value = [
+        MessageSummary(
+            id="1",
+            date="2026-03-21T10:00:00",
+            from_addr="provider@pec.it",
+            to_addrs=["user@pec.it"],
+            subject="ACCETTAZIONE",
+            pec_type="accettazione",
+            unread=True,
+            has_attachments=True,
+        )
+    ]
+    cert = DatiCert(
+        tipo="accettazione",
+        mittente="user@pec.it",
+        destinatari=["dest@pec.it"],
+        data="2026-03-21T10:00:00+00:00",
+        identificativo="opec123.abc@pec.it",
+        riferimento_message_id="orig-msg-id@example.com",
+        oggetto="hello",
+        errore="nessuno",
+    )
+    imap.fetch_message.return_value = Message(
+        id="1",
+        date="2026-03-21T10:00:00",
+        from_addr="provider@pec.it",
+        to_addrs=["user@pec.it"],
+        cc_addrs=[],
+        subject="ACCETTAZIONE",
+        pec_type="accettazione",
+        body_text="",
+        body_html=None,
+        attachments=[Attachment(filename="daticert.xml", content_type="application/xml", size=10)],
+        daticert=cert,
+    )
+    chain = pec_trace(
+        ctx=fake_ctx_with_imap,  # type: ignore[arg-type]
+        message_id="<orig-msg-id@example.com>",  # angle brackets are stripped
+    )
+    assert len(chain) == 1
+    assert chain[0]["tipo"] == "accettazione"
+    # `errore == "nessuno"` collapses to None.
+    assert chain[0]["errore"] is None
+
+
+def test_pec_trace_skips_messages_without_daticert(
+    fake_ctx_with_imap: _StubCtx,
+) -> None:
+    imap = fake_ctx_with_imap.request_context.lifespan_context.imap
+    imap.search.return_value = ["1"]
+    imap.fetch_summaries.return_value = [
+        MessageSummary(
+            id="1",
+            date="2026-03-21T10:00:00",
+            from_addr="provider@pec.it",
+            to_addrs=["user@pec.it"],
+            subject="something",
+            pec_type="accettazione",
+            unread=True,
+            has_attachments=False,
+        )
+    ]
+    imap.fetch_message.return_value = Message(
+        id="1",
+        date="2026-03-21T10:00:00",
+        from_addr="provider@pec.it",
+        to_addrs=["user@pec.it"],
+        cc_addrs=[],
+        subject="something",
+        pec_type="accettazione",
+        body_text="",
+        body_html=None,
+        attachments=[],
+        daticert=None,
+    )
+    assert pec_trace(
+        ctx=fake_ctx_with_imap,  # type: ignore[arg-type]
+        message_id="orig",
+    ) == []
+
+
+def test_pec_auth_status_returns_account_info(fake_ctx_with_imap: _StubCtx) -> None:
+    out = pec_auth_status(ctx=fake_ctx_with_imap)  # type: ignore[arg-type]
+    assert out["authenticated"] is True
+    assert out["address"] == "user@pec.it"
+    assert out["provider"] == "aruba"
+    assert "imap" in out and "smtp" in out
