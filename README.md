@@ -120,7 +120,12 @@ Find your path with `which pec-mcp`.
 |------|-------------|
 | `pec_list` | List messages (folder, unread_only, limit) |
 | `pec_get` | Get full message with body and cert |
+| `pec_search` | Search by query in subject / from / body / all + optional date |
+| `pec_list_folders` | List folders, optionally with message and unseen counts |
 | `pec_send` | Send a PEC (requires `confirm_legal_send=True`) |
+| `pec_mark_read` | Mark a message as read |
+| `pec_mark_unread` | Mark a message as unread |
+| `pec_move` | Move a message between folders (validates destination) |
 | `pec_trace` | Trace receipt chain by message ID |
 | `pec_auth_status` | Check authentication status |
 
@@ -144,6 +149,10 @@ pec trace 'opec123.20260321102500.12345.67.1.1@pec.it'
 
 # Send a PEC with attachment (interactive confirmation by default).
 pec send --to dest@pec.it --subject "Oggetto" --file body.txt --attach doc.pdf
+
+# Find PECs from INPS in April 2026, then archive one of them.
+pec search "INPS" --field from --from-date 2026-04-01
+pec move 1234 --to "[PEC]/Archivio"
 ```
 
 ## Command reference
@@ -157,6 +166,11 @@ pec send --to dest@pec.it --subject "Oggetto" --file body.txt --attach doc.pdf
 | `pec get <id> [--folder F] [--save-attachments DIR] [--cert]` | Fetch a single PEC by IMAP UID; `--cert` includes the parsed `daticert.xml` certification; `--save-attachments` writes attachments to `DIR`. |
 | `pec trace <message-id> [--folder F] [--limit N]` | Find every receipt in the folder whose `daticert.xml` references this message id, ordered chronologically (`accettazione` → `presa-in-carico` → `avvenuta-consegna` / `errore-consegna`). |
 | `pec send --to ADDR --subject S (--body T \| --file F) [--attach F] [--cc ADDR] [--dry-run] [--yes]` | Send a PEC; `--to`, `--cc`, `--attach` are repeatable. See safety note below. |
+| `pec search QUERY [--field subject\|from\|body\|all] [--folder F] [--limit N] [--from-date YYYY-MM-DD]` | Search messages by content (default `--field all` = subject ∪ from ∪ body). |
+| `pec list-folders [--counts]` | List available IMAP folders. `--counts` adds message and unseen counts per folder. |
+| `pec mark-read <id> [--folder F]` | Mark a message as read (set `\Seen`). Idempotent. |
+| `pec mark-unread <id> [--folder F]` | Mark a message as unread (clear `\Seen`). Idempotent. |
+| `pec move <id> --to FOLDER [--from FOLDER]` | Move a message between folders. Uses IMAP `MOVE` when available, otherwise `COPY` + `STORE \Deleted` + `EXPUNGE`. |
 
 ### Safety note on `pec send`
 

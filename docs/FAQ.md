@@ -56,6 +56,43 @@ Three usual causes:
    `~/Library/Logs/Claude/mcp-server-pec.log`. The first line tells you
    which account it bound to or which precondition failed.
 
+## How do I search for PECs from a specific sender?
+
+```bash
+pec search "inps@pec.it" --field from
+```
+
+`--field` is one of `subject`, `from`, `body`, `all` (default). `all` matches
+the query in any of the three. Combine with `--from-date YYYY-MM-DD` to scope
+to a time window, and `--folder` to look outside `INBOX`:
+
+```bash
+# Everything from INPS since April 2026
+pec search "INPS" --field from --from-date 2026-04-01
+
+# Anything mentioning "invoice" in the Sent folder
+pec search "invoice" --folder sent
+```
+
+The MCP tool is `pec_search(query, folder, field, limit, from_date)` with the
+same semantics.
+
+## How do I move PECs to an archive folder?
+
+```bash
+# See what folders exist
+pec list-folders --counts
+
+# Move one message into an archive folder
+pec move 1234 --to "[PEC]/Archivio"
+```
+
+`pec move` validates that the destination exists before touching the
+source — if you typo the folder name you get an error, not a deleted
+message. The CLI prefers IMAP `MOVE` (RFC 6851) and transparently falls
+back to `COPY` + `STORE \Deleted` + `EXPUNGE` on older servers. The MCP
+equivalent is `pec_move(message_id, to_folder, from_folder)`.
+
 ## What's the `Message-ID` rule for retries?
 
 The `Message-ID` header on outgoing PECs is a SHA-256 of
